@@ -1,0 +1,556 @@
+#!/usr/bin/env python3
+"""Apocalypse server — stdlib only. Serves dashboard + SSE + transcript API."""
+
+import http.server
+import json
+import os
+import queue
+import threading
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+PORT = 7749
+DATA_DIR = Path.home() / ".claude" / "apocalypse"
+EVENTS_FILE = DATA_DIR / "events.jsonl"
+SESSIONS_DIR = DATA_DIR / "sessions"
+PROJECTS_DIR = Path.home() / ".claude" / "projects"
+DASHBOARD_FILE = Path(__file__).parent / "dashboard.html"
+
+STALE_SECONDS = 86400  # 1 day
+TRANSCRIPT_LIMIT = 50
+
+# Records that aren't real conversation turns.
+SKIP_TYPES = {
+    "attachment",
+    "file-history-snapshot",
+    "last-prompt",
+    "permission-mode",
+    "ai-title",
+    "queue-operation",
+    "hook_success",
+    "hook_failure",
+    "system",
+}
+
+_sse_clients = []
+_sse_lock = threading.Lock()
+
+
+# ─────────────────────────── events.jsonl plumbing ────────────────────────────
+
+def tail_events(last_pos=0):
+    if not EVENTS_FILE.exists():
+        return [], last_pos
+    with open(EVENTS_FILE, "r", encoding="utf-8") as f:
+        f.seek(last_pos)
+        new = f.readlines()
+        new_pos = f.tell()
+    return [l.strip() for l in new if l.strip()], new_pos
+
+
+def broadcast_thread():
+    pos = EVENTS_FILE.stat().st_size if EVENTS_FILE.exists() else 0
+    while True:
+        time.sleep(0.5)
+        lines, pos = tail_events(pos)
+        if not lines:
+            continue
+        with _sse_lock:
+            clients = list(_sse_clients)
+        for c in clients:
+            for line in lines:
+                try:
+                    c.put_nowait(f"data: {line}\n\n".encode("utf-8"))
+                except queue.Full:
+                    pass
+
+
+def read_events(n=500):
+    if not EVENTS_FILE.exists():
+        return []
+    with open(EVENTS_FILE, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+    events = []
+    for line in lines[-n:]:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            events.append(json.loads(line))
+        except Exception:
+            pass
+    return events
+
+
+# ─────────────────────────── transcript scanning ──────────────────────────────
+
+def _project_name(cwd):
+    if not cwd:
+        return "unknown"
+    s = str(cwd).replace("\\", "/").rstrip("/")
+    if not s:
+        return "unknown"
+    return s.rsplit("/", 1)[-1]
+
+
+def _read_tail_records(path, max_bytes=300_000, max_lines=80):
+    """Seek to end and parse up to max_lines JSON records from the tail."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, 2)
+            sz = f.tell()
+            start = max(0, sz - max_bytes)
+            f.seek(start)
+            chunk = f.read()
+    except Exception:
+        return []
+    text = chunk.decode("utf-8", errors="replace")
+    if start > 0:
+        nl = text.find("\n")
+        if nl >= 0:
+            text = text[nl + 1:]
+    lines = text.split("\n")
+    records = []
+    for line in lines[-max_lines:]:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            records.append(json.loads(line))
+        except Exception:
+            continue
+    return records
+
+
+def _ts_to_dt(ts):
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def _determine_status(records, last_ts):
+    """Three-state status from the tail records."""
+    status = "grey"
+
+    # 1) Last assistant record — if it contains tool_use, Claude is working.
+    last_assistant = None
+    for r in reversed(records):
+        if r.get("type") == "assistant":
+            last_assistant = r
+            break
+    if last_assistant:
+        content = (last_assistant.get("message") or {}).get("content") or []
+        if isinstance(content, list) and any(
+            isinstance(c, dict) and c.get("type") == "tool_use" for c in content
+        ):
+            status = "green"
+
+    # 2) Otherwise, classify by the last substantive record.
+    if status == "grey":
+        last_sub = None
+        for r in reversed(records):
+            if r.get("type", "") in SKIP_TYPES:
+                continue
+            last_sub = r
+            break
+        if last_sub:
+            t = last_sub.get("type", "")
+            content = (last_sub.get("message") or {}).get("content") or []
+            if isinstance(content, list):
+                if t == "assistant":
+                    if any(isinstance(c, dict) and c.get("type") == "text" for c in content):
+                        status = "yellow"
+                    elif any(isinstance(c, dict) and c.get("type") == "thinking" for c in content):
+                        status = "green"
+                elif t == "user":
+                    if any(isinstance(c, dict) and c.get("type") == "tool_result" for c in content):
+                        status = "green"
+
+    # 3) Stale beats anything.
+    dt = _ts_to_dt(last_ts)
+    if dt is not None:
+        try:
+            now = datetime.now(timezone.utc)
+            if (now - dt).total_seconds() > STALE_SECONDS:
+                return "grey"
+        except Exception:
+            pass
+    return status
+
+
+def _analyze_transcript(path):
+    cwd = None
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                try:
+                    d = json.loads(line)
+                except Exception:
+                    continue
+                if d.get("cwd"):
+                    cwd = d["cwd"]
+                    break
+    except Exception:
+        return None
+
+    tail = _read_tail_records(path)
+    last_ts = None
+    for r in reversed(tail):
+        if r.get("timestamp"):
+            last_ts = r["timestamp"]
+            break
+    if last_ts is None:
+        try:
+            mt = path.stat().st_mtime
+            last_ts = datetime.fromtimestamp(mt, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        except Exception:
+            last_ts = ""
+
+    status = _determine_status(tail, last_ts)
+
+    return {
+        "session_id": path.stem,
+        "cwd": cwd or "",
+        "project_name": _project_name(cwd),
+        "last_ts": last_ts,
+        "status": status,
+        "resume_id": path.stem,
+    }
+
+
+def scan_transcripts(limit=TRANSCRIPT_LIMIT):
+    if not PROJECTS_DIR.exists():
+        return []
+    results = []
+    for proj_dir in PROJECTS_DIR.iterdir():
+        if not proj_dir.is_dir():
+            continue
+        for jsonl in proj_dir.glob("*.jsonl"):
+            try:
+                meta = _analyze_transcript(jsonl)
+                if meta:
+                    results.append(meta)
+            except Exception:
+                continue
+    results.sort(key=lambda r: r.get("last_ts") or "", reverse=True)
+    return results[:limit]
+
+
+def _find_transcript_path(session_id):
+    if not PROJECTS_DIR.exists():
+        return None
+    if "/" in session_id or "\\" in session_id or session_id.startswith("."):
+        return None
+    for proj_dir in PROJECTS_DIR.iterdir():
+        if not proj_dir.is_dir():
+            continue
+        cand = proj_dir / (session_id + ".jsonl")
+        if cand.exists():
+            return cand
+    return None
+
+
+def parse_conversation(path):
+    """Walk the transcript and produce a list of user/assistant/tool messages."""
+    msgs = []
+    tool_idx_by_id = {}
+
+    try:
+        f = open(path, "r", encoding="utf-8", errors="replace")
+    except Exception:
+        return []
+
+    with f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                d = json.loads(line)
+            except Exception:
+                continue
+            t = d.get("type", "")
+            if t in SKIP_TYPES:
+                continue
+            ts = d.get("timestamp", "")
+            msg = d.get("message") or {}
+            content = msg.get("content", [])
+            if isinstance(content, str):
+                content = [{"type": "text", "text": content}]
+            if not isinstance(content, list):
+                continue
+
+            if t == "user":
+                texts = [c.get("text", "") for c in content
+                         if isinstance(c, dict) and c.get("type") == "text"]
+                tool_results = [c for c in content
+                                if isinstance(c, dict) and c.get("type") == "tool_result"]
+                if texts:
+                    msgs.append({
+                        "role": "user",
+                        "ts": ts,
+                        "text": "\n".join(t for t in texts if t),
+                    })
+                for tr in tool_results:
+                    tuid = tr.get("tool_use_id")
+                    out = tr.get("content", "")
+                    if isinstance(out, list):
+                        out = "\n".join(
+                            c.get("text", "") for c in out
+                            if isinstance(c, dict) and c.get("type") == "text"
+                        )
+                    if not isinstance(out, str):
+                        out = json.dumps(out, ensure_ascii=False)
+                    if tuid and tuid in tool_idx_by_id:
+                        idx = tool_idx_by_id[tuid]
+                        msgs[idx]["output"] = out
+                        msgs[idx]["is_error"] = bool(tr.get("is_error"))
+                    else:
+                        msgs.append({
+                            "role": "tool",
+                            "ts": ts,
+                            "tool_use_id": tuid or "",
+                            "tool": "",
+                            "input": "",
+                            "output": out,
+                            "is_error": bool(tr.get("is_error")),
+                        })
+
+            elif t == "assistant":
+                texts = [c.get("text", "") for c in content
+                         if isinstance(c, dict) and c.get("type") == "text"]
+                tool_uses = [c for c in content
+                             if isinstance(c, dict) and c.get("type") == "tool_use"]
+                thinkings = [c.get("thinking", "") for c in content
+                             if isinstance(c, dict) and c.get("type") == "thinking"]
+                if texts:
+                    text_joined = "\n".join(t for t in texts if t)
+                    if text_joined.strip():
+                        msgs.append({"role": "assistant", "ts": ts, "text": text_joined})
+                if thinkings and not texts:
+                    thinking_joined = "\n".join(t for t in thinkings if t)
+                    if thinking_joined.strip():
+                        msgs.append({
+                            "role": "thinking",
+                            "ts": ts,
+                            "text": thinking_joined,
+                        })
+                for tu in tool_uses:
+                    tuid = tu.get("id") or ""
+                    tool_name = tu.get("name", "")
+                    inp = tu.get("input", {})
+                    if not isinstance(inp, str):
+                        try:
+                            inp = json.dumps(inp, ensure_ascii=False, indent=2)
+                        except Exception:
+                            inp = str(inp)
+                    entry = {
+                        "role": "tool",
+                        "ts": ts,
+                        "tool_use_id": tuid,
+                        "tool": tool_name,
+                        "input": inp,
+                        "output": None,
+                        "is_error": False,
+                    }
+                    msgs.append(entry)
+                    if tuid:
+                        tool_idx_by_id[tuid] = len(msgs) - 1
+
+    return msgs
+
+
+def delete_session_artifacts(session_id):
+    """Remove snapshot files for session_id and filter events.jsonl. Leaves projects/ alone."""
+    removed = {"snapshot_files": [], "events_dropped": 0}
+
+    if SESSIONS_DIR.exists() and "/" not in session_id and "\\" not in session_id:
+        for ext in (".json", ".jsonl"):
+            p = SESSIONS_DIR / (session_id + ext)
+            if p.exists():
+                try:
+                    p.unlink()
+                    removed["snapshot_files"].append(p.name)
+                except Exception:
+                    pass
+
+    if EVENTS_FILE.exists():
+        kept = []
+        dropped = 0
+        with open(EVENTS_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                raw = line.rstrip("\n")
+                try:
+                    d = json.loads(raw)
+                except Exception:
+                    kept.append(raw)
+                    continue
+                if d.get("session_id") == session_id:
+                    dropped += 1
+                    continue
+                kept.append(raw)
+        if dropped:
+            tmp = EVENTS_FILE.with_suffix(".jsonl.tmp")
+            with open(tmp, "w", encoding="utf-8") as f:
+                for line in kept:
+                    f.write(line + "\n")
+            os.replace(tmp, EVENTS_FILE)
+        removed["events_dropped"] = dropped
+
+    return removed
+
+
+# ─────────────────────── legacy snapshot file listing ─────────────────────────
+
+def list_snapshots():
+    if not SESSIONS_DIR.exists():
+        return []
+    files = sorted(
+        list(SESSIONS_DIR.glob("*.json")) + list(SESSIONS_DIR.glob("*.jsonl")),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    return [{
+        "id": f.stem,
+        "filename": f.name,
+        "size": f.stat().st_size,
+        "mtime": f.stat().st_mtime,
+    } for f in files[:100]]
+
+
+# ──────────────────────────────── HTTP handler ────────────────────────────────
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, format, *args):
+        return
+
+    def send_json(self, data, status=200):
+        body = json.dumps(data, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        path = self.path.split("?")[0]
+
+        if path == "/":
+            if DASHBOARD_FILE.exists():
+                body = DASHBOARD_FILE.read_bytes()
+            else:
+                body = b"<h1>Apocalypse</h1><p>dashboard.html not found</p>"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        elif path == "/api/events":
+            self.send_json(read_events())
+
+        elif path == "/api/sessions":
+            self.send_json(list_snapshots())
+
+        elif path.startswith("/api/sessions/"):
+            name = path[len("/api/sessions/"):]
+            if "/" in name or "\\" in name or name.startswith("."):
+                self.send_json({"error": "bad name"}, 400)
+                return
+            fpath = SESSIONS_DIR / name
+            if fpath.exists() and fpath.suffix in (".json", ".jsonl"):
+                body = fpath.read_bytes()
+                self.send_response(200)
+                ctype = "application/json" if fpath.suffix == ".json" else "application/x-ndjson"
+                self.send_header("Content-Type", ctype + "; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            else:
+                self.send_json({"error": "not found"}, 404)
+
+        elif path == "/api/sessions2":
+            self.send_json(scan_transcripts())
+
+        elif path.startswith("/api/sessions2/"):
+            session_id = path[len("/api/sessions2/"):]
+            tpath = _find_transcript_path(session_id)
+            if not tpath:
+                self.send_json({"error": "not found"}, 404)
+                return
+            self.send_json(parse_conversation(tpath))
+
+        elif path == "/events/stream":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("X-Accel-Buffering", "no")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+
+            q = queue.Queue(maxsize=1024)
+            with _sse_lock:
+                _sse_clients.append(q)
+
+            try:
+                self.wfile.write(b": connected\n\n")
+                self.wfile.flush()
+                last_heartbeat = time.time()
+                while True:
+                    try:
+                        payload = q.get(timeout=5)
+                        self.wfile.write(payload)
+                        self.wfile.flush()
+                    except queue.Empty:
+                        pass
+                    if time.time() - last_heartbeat > 15:
+                        self.wfile.write(b": heartbeat\n\n")
+                        self.wfile.flush()
+                        last_heartbeat = time.time()
+            except Exception:
+                pass
+            finally:
+                with _sse_lock:
+                    if q in _sse_clients:
+                        _sse_clients.remove(q)
+
+        else:
+            self.send_json({"error": "not found"}, 404)
+
+    def do_DELETE(self):
+        path = self.path.split("?")[0]
+        if path.startswith("/api/sessions2/"):
+            session_id = path[len("/api/sessions2/"):]
+            if "/" in session_id or "\\" in session_id or not session_id:
+                self.send_json({"error": "bad id"}, 400)
+                return
+            result = delete_session_artifacts(session_id)
+            self.send_json({"ok": True, **result})
+        else:
+            self.send_json({"error": "not found"}, 404)
+
+
+if __name__ == "__main__":
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+
+    pid_file = DATA_DIR / "server.pid"
+    pid_file.write_text(str(os.getpid()))
+
+    t = threading.Thread(target=broadcast_thread, daemon=True)
+    t.start()
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+    print(f"Apocalypse running at http://localhost:{PORT}", flush=True)
+    try:
+        server.serve_forever()
+    finally:
+        try:
+            pid_file.unlink()
+        except FileNotFoundError:
+            pass
