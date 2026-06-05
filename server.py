@@ -16,6 +16,8 @@ EVENTS_FILE = DATA_DIR / "events.jsonl"
 SESSIONS_DIR = DATA_DIR / "sessions"
 PROJECTS_DIR = Path.home() / ".claude" / "projects"
 DASHBOARD_FILE = Path(__file__).parent / "dashboard.html"
+WORKSPACE_FILE = DATA_DIR / "workspace.json"
+WORKSPACE_HTML = Path(__file__).parent / "workspace.html"
 
 STALE_SECONDS = 86400  # 1 day
 TRANSCRIPT_LIMIT = 50
@@ -254,6 +256,41 @@ def _find_transcript_path(session_id):
     return None
 
 
+_NOISE_PREFIXES_SERVER = (
+    "<local-command-caveat>", "<local-command-stdout>",
+    "<command-message>", "<command-name>", "<command-args>",
+    "<bash-input>", "<bash-stdout>", "<bash-stderr>",
+    "You are running as a local coding agent for a Multica",
+    "You are running as a chat assistant for a Multica",
+    "<persisted-output>",
+)
+
+
+def _is_noise_user(d):
+    """Check if a user record is noise (not natural language from a human)."""
+    if d.get("isMeta"):
+        return True
+    msg = d.get("message") or {}
+    content = msg.get("content", [])
+    if isinstance(content, str):
+        text = content.strip()
+        if text and any(text.startswith(p) for p in _NOISE_PREFIXES_SERVER):
+            return True
+        return False
+    if not isinstance(content, list):
+        return True
+    # All tool_results = noise (not human language)
+    if all(isinstance(c, dict) and c.get("type") == "tool_result" for c in content):
+        return True
+    # Check text content for noise prefixes
+    for c in content:
+        if isinstance(c, dict) and c.get("type") == "text":
+            text = (c.get("text") or "").strip()
+            if text and any(text.startswith(p) for p in _NOISE_PREFIXES_SERVER):
+                return True
+    return False
+
+
 def parse_conversation(path):
     """Walk the transcript and produce a list of user/assistant/tool messages."""
     msgs = []
@@ -285,16 +322,20 @@ def parse_conversation(path):
                 continue
 
             if t == "user":
-                texts = [c.get("text", "") for c in content
-                         if isinstance(c, dict) and c.get("type") == "text"]
+                is_noise = _is_noise_user(d)
                 tool_results = [c for c in content
                                 if isinstance(c, dict) and c.get("type") == "tool_result"]
-                if texts:
-                    msgs.append({
-                        "role": "user",
-                        "ts": ts,
-                        "text": "\n".join(t for t in texts if t),
-                    })
+                # Only add user text if NOT noise
+                if not is_noise:
+                    texts = [c.get("text", "") for c in content
+                             if isinstance(c, dict) and c.get("type") == "text"]
+                    if texts:
+                        msgs.append({
+                            "role": "user",
+                            "ts": ts,
+                            "text": "\n".join(t for t in texts if t),
+                        })
+                # Always process tool results (link to tool_use or add as tool msg)
                 for tr in tool_results:
                     tuid = tr.get("tool_use_id")
                     out = tr.get("content", "")
@@ -422,6 +463,32 @@ def list_snapshots():
     } for f in files[:100]]
 
 
+# ──────────────────────────────── workspace API ───────────────────────────────
+
+def _load_workspace():
+    if not WORKSPACE_FILE.exists():
+        return None
+    try:
+        return json.loads(WORKSPACE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def workspace_status():
+    ws = _load_workspace()
+    if ws is None:
+        return {"initialized": False, "project_count": 0, "session_count": 0}
+    projects = ws.get("projects", {})
+    session_count = sum(
+        len(p.get("analyzed_sessions", {})) for p in projects.values()
+    )
+    return {
+        "initialized": bool(ws.get("last_full_init")),
+        "project_count": len(projects),
+        "session_count": session_count,
+    }
+
+
 # ──────────────────────────────── HTTP handler ────────────────────────────────
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -476,6 +543,39 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         elif path == "/api/sessions2":
             self.send_json(scan_transcripts())
+
+        elif path == "/api/workspace/status":
+            self.send_json(workspace_status())
+
+        elif path == "/api/workspace":
+            ws = _load_workspace()
+            if ws is None:
+                self.send_json({})
+            else:
+                self.send_json(ws)
+
+        elif path == "/workspace.html":
+            if WORKSPACE_HTML.exists():
+                body = WORKSPACE_HTML.read_bytes()
+            else:
+                body = b"<h1>workspace.html not found</h1>"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        elif path in ("/three.module.min.js", "/OrbitControls.js"):
+            fpath = Path(__file__).parent / path.lstrip("/")
+            if fpath.exists():
+                body = fpath.read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/javascript; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            else:
+                self.send_json({"error": "not found"}, 404)
 
         elif path.startswith("/api/sessions2/"):
             session_id = path[len("/api/sessions2/"):]

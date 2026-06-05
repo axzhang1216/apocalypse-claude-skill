@@ -1,0 +1,1324 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>🌌 Apocalypse Workspace</title>
+<style>
+  :root {
+    --bg: #0d1117; --bg2: #161b22; --bg3: #21262d;
+    --border: #30363d; --text: #c9d1d9; --muted: #8b949e;
+    --green: #3fb950; --yellow: #d29922; --grey: #6e7681;
+    --red: #f85149; --blue: #58a6ff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: 'SF Mono', 'Fira Code', Consolas, monospace; font-size: 14px; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+  header { display: flex; align-items: center; gap: 16px; padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--bg2); flex-shrink: 0; }
+  header h1 { font-size: 16px; font-weight: 600; }
+  header a { color: var(--muted); text-decoration: none; font-size: 13px; }
+  header a:hover { color: var(--text); }
+  #back-btn { display: none; background: transparent; border: 1px solid var(--border); color: var(--text); padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 13px; font-family: inherit; }
+  #back-btn:hover { background: var(--bg3); }
+  #project-label { font-size: 15px; font-weight: 600; color: var(--blue); display: none; }
+  #canvas-wrap { flex: 1; position: relative; }
+  #canvas { display: block; width: 100%; height: 100%; }
+  #tooltip {
+    position: absolute; pointer-events: none; display: none;
+    background: var(--bg2); border: 1px solid var(--border);
+    border-radius: 6px; padding: 8px 12px; font-size: 12px;
+    max-width: 240px; line-height: 1.5; z-index: 10;
+  }
+  #tooltip .tt-name { font-weight: 600; font-size: 13px; margin-bottom: 4px; }
+  #tooltip .tt-meta { color: var(--muted); }
+  #tooltip .tt-tag { display: inline-block; background: var(--bg3); color: var(--blue); border-radius: 3px; padding: 1px 6px; font-size: 11px; margin-right: 4px; }
+  #side-panel {
+    position: absolute; top: 0; right: -340px; width: 320px; height: 100%;
+    background: var(--bg2); border-left: 1px solid var(--border);
+    padding: 16px; overflow-y: auto; transition: right 0.25s ease; z-index: 20;
+  }
+  #side-panel.open { right: 0; }
+  #side-panel h2 { font-size: 14px; font-weight: 600; margin-bottom: 12px; }
+  #side-panel .label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; margin-top: 12px; margin-bottom: 4px; }
+  #side-panel .value { font-size: 13px; line-height: 1.5; }
+  .outcome-badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+  .outcome-completed { background: rgba(63,185,80,0.2); color: var(--green); }
+  .outcome-partial { background: rgba(210,153,34,0.2); color: var(--yellow); }
+  .outcome-abandoned { background: rgba(110,118,129,0.2); color: var(--grey); }
+  #close-panel { float: right; background: transparent; border: none; color: var(--muted); cursor: pointer; font-size: 16px; line-height: 1; }
+  #close-panel:hover { color: var(--text); }
+  #empty-msg {
+    position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    text-align: center; color: var(--muted); font-size: 14px; line-height: 1.8;
+    display: none;
+  }
+  #empty-msg a { color: var(--blue); }
+  /* CRT scanline overlay for retro feel */
+  #canvas-wrap::after {
+    content: '';
+    position: absolute; inset: 0;
+    background: repeating-linear-gradient(
+      180deg,
+      rgba(0,0,0,0) 0,
+      rgba(0,0,0,0) 2px,
+      rgba(0,0,0,0.22) 3px,
+      rgba(0,0,0,0) 4px
+    );
+    pointer-events: none;
+    z-index: 5;
+    opacity: 0.55;
+    mix-blend-mode: multiply;
+  }
+  /* faint vignette */
+  #canvas-wrap::before {
+    content: '';
+    position: absolute; inset: 0;
+    background: radial-gradient(ellipse at center, rgba(0,0,0,0) 55%, rgba(0,0,0,0.55) 100%);
+    pointer-events: none;
+    z-index: 4;
+  }
+
+  /* Enhanced tooltip for realistic nebulae */
+  #tooltip {
+    backdrop-filter: blur(4px);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+  }
+
+  /* Loading indicator */
+  .loading-overlay {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    background: rgba(0,0,0,0.8);
+    color: var(--text);
+    padding: 20px 30px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    font-size: 14px;
+    z-index: 100;
+    display: none;
+  }
+
+  .loading-overlay.visible {
+    display: block;
+  }
+
+  /* Performance stats */
+  #perf-stats {
+    position: absolute;
+    bottom: 10px;
+    left: 10px;
+    background: rgba(0,0,0,0.7);
+    color: var(--muted);
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    z-index: 10;
+    display: none;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>🌌 Workspace</h1>
+  <button id="back-btn">← Universe</button>
+  <span id="project-label"></span>
+  <a href="/" style="margin-left:auto">← Dashboard</a>
+</header>
+<div id="canvas-wrap">
+  <canvas id="canvas"></canvas>
+  <div id="tooltip"></div>
+  <div id="side-panel">
+    <button id="close-panel" title="Close">✕</button>
+    <h2 id="panel-title"></h2>
+    <div class="label">Goal</div>
+    <div class="value" id="panel-goal"></div>
+    <div class="label">Summary</div>
+    <div class="value" id="panel-summary"></div>
+    <div class="label">Outcome</div>
+    <div class="value" id="panel-outcome"></div>
+    <div class="label">Key Tools</div>
+    <div class="value" id="panel-tools"></div>
+    <div class="label">Timestamp</div>
+    <div class="value" id="panel-ts"></div>
+  </div>
+  <div id="empty-msg">
+    Workspace not initialized.<br>
+    Run <code>/apocalypse</code> to get started.
+  </div>
+  <div id="loading-overlay" class="loading-overlay">
+    Generating nebulae...
+  </div>
+  <div id="perf-stats"></div>
+</div>
+
+<script>
+let THREE, OrbitControls;
+
+// ──── state ────────────────────────────────────────────────────────────────
+let wsData = null;
+let scene, camera, renderer, controls;
+let raycaster, mouse;
+let projectMeshes = [];   // Universe view
+let starMeshes = [];      // Solar system view
+let planetMeshes = [];    // Solar system view orbiting
+let currentView = 'universe'; // 'universe' | 'solar'
+let currentProject = null;
+let hoveredMesh = null;
+let animFrame = null;
+let planetOrbits = [];    // {mesh, star, radius, speed, angle}
+let currentLayout = null; // Store layout for resize handling
+
+const tooltip = document.getElementById('tooltip');
+const sidePanel = document.getElementById('side-panel');
+const backBtn = document.getElementById('back-btn');
+const projectLabel = document.getElementById('project-label');
+const emptyMsg = document.getElementById('empty-msg');
+
+// ──── init renderer ────────────────────────────────────────────────────────
+function initRenderer() {
+  const canvas = document.getElementById('canvas');
+  // antialias: false keeps the pixel-art look crisp (no edge smoothing on sprites)
+  renderer = new THREE.WebGLRenderer({ canvas, antialias: false });
+  renderer.setPixelRatio(1);
+  resize();
+  window.addEventListener('resize', resize);
+}
+
+function resize() {
+  const wrap = document.getElementById('canvas-wrap');
+  const w = wrap.clientWidth, h = wrap.clientHeight;
+  renderer.setSize(w, h);
+  if (camera) {
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+
+    // Re-adjust camera if we have layout data
+    if (currentLayout && currentView === 'universe') {
+      adjustCameraForLayout(currentLayout.bounds);
+    }
+  }
+}
+
+function makeScene() {
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x050810);
+  camera = new THREE.PerspectiveCamera(60, renderer.domElement.width / renderer.domElement.height, 0.1, 2000);
+  camera.position.set(0, 0, 120);
+  controls = new OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.08;
+  raycaster = new THREE.Raycaster();
+  mouse = new THREE.Vector2(-9999, -9999);
+}
+
+// ──── pixel texture factory ────────────────────────────────────────────────
+// All textures use NearestFilter so pixels stay crisp at any scale (no blur).
+// Bayer 4x4 ordered dither gives that authentic 8-bit gradient look.
+const BAYER4 = [
+  [ 0,  8,  2, 10],
+  [12,  4, 14,  6],
+  [ 3, 11,  1,  9],
+  [15,  7, 13,  5],
+];
+
+// ──── Simplex Noise Implementation ────────────────────────────────────────
+// 2D Simplex noise for generating realistic nebula textures
+const SimplexNoise = (function() {
+  // Gradient vectors for 2D
+  const grad3 = [
+    [1,1,0],[-1,1,0],[1,-1,0],[-1,-1,0],
+    [1,0,1],[-1,0,1],[1,0,-1],[-1,0,-1],
+    [0,1,1],[0,-1,1],[0,1,-1],[0,-1,-1]
+  ];
+
+  // Permutation table
+  const p = [151,160,137,91,90,15,131,13,201,95,96,53,194,233,7,225,140,36,103,
+    30,69,142,8,99,37,240,21,10,23,190,6,148,247,120,234,75,0,26,197,62,94,252,
+    219,203,117,35,11,32,57,177,33,88,237,149,56,87,174,20,125,136,171,168,68,
+    175,74,165,71,134,139,48,27,166,77,146,158,231,83,111,229,122,60,211,133,230,
+    220,105,92,41,55,46,245,40,244,102,143,54,65,25,63,161,1,216,80,73,209,76,
+    132,187,208,89,18,169,200,196,135,130,116,188,159,86,164,100,109,198,173,186,
+    3,64,52,217,226,250,124,123,5,202,38,147,118,126,255,82,85,212,207,206,59,
+    227,47,16,58,17,182,189,28,42,223,183,170,213,119,248,152,2,44,154,163,70,
+    221,153,101,155,167,43,172,9,129,22,39,253,19,98,108,110,79,113,224,232,178,
+    185,112,104,218,246,97,228,251,34,242,193,238,210,144,12,191,179,162,241,81,
+    51,145,235,249,14,239,107,49,192,214,31,181,199,106,157,184,84,204,176,115,
+    121,50,45,127,4,150,254,138,236,205,93,222,114,67,29,24,72,243,141,128,195,
+    78,66,215,61,156,180];
+
+  // Double the permutation table
+  const perm = new Array(512);
+  const permMod12 = new Array(512);
+  for (let i = 0; i < 512; i++) {
+    perm[i] = p[i & 255];
+    permMod12[i] = perm[i] % 12;
+  }
+
+  // Skewing factors for 2D
+  const F2 = 0.5 * (Math.sqrt(3.0) - 1.0);
+  const G2 = (3.0 - Math.sqrt(3.0)) / 6.0;
+
+  function dot2(g, x, y) {
+    return g[0] * x + g[1] * y;
+  }
+
+  return {
+    noise2D: function(xin, yin, seed) {
+      if (seed) {
+        // Simple seed-based offset
+        xin += seed * 17.3;
+        yin += seed * 13.7;
+      }
+
+      let n0, n1, n2; // Noise contributions from the three corners
+
+      // Skew the input space to determine which simplex cell we're in
+      const s = (xin + yin) * F2; // Hairy factor for 2D
+      const i = Math.floor(xin + s);
+      const j = Math.floor(yin + s);
+      const t = (i + j) * G2;
+      const X0 = i - t; // Unskew the cell origin back to (x,y) space
+      const Y0 = j - t;
+      const x0 = xin - X0; // The distances from the cell origin
+      const y0 = yin - Y0;
+
+      // Determine which simplex we are in.
+      let i1, j1; // Offsets for second (middle) corner of simplex in (i,j) coords
+      if (x0 > y0) { i1 = 1; j1 = 0; } // Lower triangle, XY order: (0,0)->(1,0)->(1,1)
+      else { i1 = 0; j1 = 1; } // Upper triangle, YX order: (0,0)->(0,1)->(1,1)
+
+      // Offsets for middle corner in (x,y) unskewed coords
+      const x1 = x0 - i1 + G2;
+      const y1 = y0 - j1 + G2;
+      // Offsets for last corner in (x,y) unskewed coords
+      const x2 = x0 - 1.0 + 2.0 * G2;
+      const y2 = y0 - 1.0 + 2.0 * G2;
+
+      // Work out the hashed gradient indices of the three simplex corners
+      const ii = i & 255;
+      const jj = j & 255;
+      const gi0 = permMod12[ii + perm[jj]];
+      const gi1 = permMod12[ii + i1 + perm[jj + j1]];
+      const gi2 = permMod12[ii + 1 + perm[jj + 1]];
+
+      // Calculate the contribution from the three corners
+      let t0 = 0.5 - x0 * x0 - y0 * y0;
+      if (t0 < 0) n0 = 0.0;
+      else { t0 *= t0; n0 = t0 * t0 * dot2(grad3[gi0], x0, y0); }
+
+      let t1 = 0.5 - x1 * x1 - y1 * y1;
+      if (t1 < 0) n1 = 0.0;
+      else { t1 *= t1; n1 = t1 * t1 * dot2(grad3[gi1], x1, y1); }
+
+      let t2 = 0.5 - x2 * x2 - y2 * y2;
+      if (t2 < 0) n2 = 0.0;
+      else { t2 *= t2; n2 = t2 * t2 * dot2(grad3[gi2], x2, y2); }
+
+      // Add contributions from each corner to get the final noise value.
+      // The result is scaled to return values in the interval [-1,1].
+      return 70.0 * (n0 + n1 + n2);
+    },
+
+    // Multi-octave noise for more complex patterns
+    fractalNoise: function(x, y, octaves, lacunarity, gain, seed) {
+      let sum = 0;
+      let amplitude = 1.0;
+      let frequency = 1.0;
+      let maxValue = 0;
+
+      for (let i = 0; i < octaves; i++) {
+        sum += amplitude * this.noise2D(x * frequency, y * frequency, seed + i * 100);
+        maxValue += amplitude;
+        amplitude *= gain;
+        frequency *= lacunarity;
+      }
+
+      return sum / maxValue;
+    }
+  };
+})();
+
+const textureCache = {};
+
+function makePixelTexture(size, drawFn) {
+  const c = document.createElement('canvas');
+  c.width = size; c.height = size;
+  const ctx = c.getContext('2d');
+  const img = ctx.createImageData(size, size);
+  drawFn(img, size);
+  ctx.putImageData(img, 0, 0);
+  const tex = new THREE.CanvasTexture(c);
+  tex.magFilter = THREE.NearestFilter;
+  tex.minFilter = THREE.NearestFilter;
+  tex.generateMipmaps = false;
+  return tex;
+}
+
+function setPx(img, size, x, y, r, g, b, a) {
+  if (x < 0 || x >= size || y < 0 || y >= size) return;
+  const i = (y * size + x) * 4;
+  img.data[i]     = r;
+  img.data[i + 1] = g;
+  img.data[i + 2] = b;
+  img.data[i + 3] = a;
+}
+
+function hexToRgb(hex) {
+  return { r: (hex >> 16) & 255, g: (hex >> 8) & 255, b: hex & 255 };
+}
+
+// Nebula: realistic multi-layered noise with dust lanes and glow
+function makeNebulaTex(colorHex) {
+  const key = 'nebula_' + colorHex;
+  if (textureCache[key]) return textureCache[key];
+
+  const { r, g, b } = hexToRgb(colorHex);
+  const size = 128; // Higher resolution for realism
+  const seed = colorHash(colorHex); // Deterministic seed from color
+
+  const tex = makePixelTexture(size, (img) => {
+    const cx = size / 2, cy = size / 2;
+    const maxR = size / 2;
+
+    // Color palette for realistic nebula
+    const colors = generateNebulaColors(r, g, b);
+
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        const dx = x - cx, dy = y - cy;
+        const dist = Math.sqrt(dx * dx + dy * dy) / maxR;
+
+        if (dist > 1.2) continue; // Allow slight overflow for soft edges
+
+        // Normalize coordinates for noise
+        const nx = (x / size - 0.5) * 4;
+        const ny = (y / size - 0.5) * 4;
+
+        // Layer 1: Base structure (low frequency)
+        const baseNoise = SimplexNoise.fractalNoise(nx, ny, 3, 2.0, 0.5, seed);
+
+        // Layer 2: Filament details (high frequency)
+        const detailNoise = SimplexNoise.fractalNoise(nx * 3, ny * 3, 4, 2.0, 0.6, seed + 1000);
+
+        // Layer 3: Dust lanes (medium frequency, negative for absorption)
+        const dustNoise = SimplexNoise.fractalNoise(nx * 1.5, ny * 1.5, 2, 2.0, 0.4, seed + 2000);
+
+        // Layer 4: Core glow (very low frequency)
+        const coreGlow = SimplexNoise.noise2D(nx * 0.3, ny * 0.3, seed + 3000);
+
+        // Combine layers — normalize noise to 0..1
+        let intensity = 0;
+
+        // Base cloud structure
+        intensity += (baseNoise * 0.5 + 0.5) * 0.5;
+
+        // Add fine details
+        intensity += (detailNoise * 0.5 + 0.5) * 0.25;
+
+        // Dust absorption (creates dark lanes)
+        const dustAbsorption = Math.max(0, dustNoise * 0.3 + 0.2);
+        intensity *= (1 - dustAbsorption * 0.35);
+
+        // Core glow enhancement
+        const coreIntensity = Math.max(0, coreGlow * 0.5 + 0.5);
+        intensity += coreIntensity * 0.35;
+
+        // Radial falloff - softer at edges
+        const radialFade = 1 - Math.pow(dist, 1.8);
+        intensity *= radialFade;
+
+        // Clamp
+        intensity = Math.max(0, Math.min(1, intensity));
+
+        // Apply gamma curve
+        intensity = Math.pow(intensity, 0.75);
+
+        // Color mapping based on intensity and position
+        const colorIndex = Math.floor(intensity * (colors.length - 1));
+        const color = colors[Math.min(colorIndex, colors.length - 1)];
+
+        // Add subtle color variation based on position
+        const colorVariation = SimplexNoise.noise2D(nx * 2, ny * 2, seed + 4000) * 0.1;
+
+        // Final color with brightness boost for core
+        const coreBoost = 1 + Math.pow(1 - dist, 3) * 0.6;
+        const finalR = Math.min(255, Math.floor((color.r + colorVariation * 30) * coreBoost));
+        const finalG = Math.min(255, Math.floor((color.g + colorVariation * 20) * coreBoost));
+        const finalB = Math.min(255, Math.floor((color.b + colorVariation * 40) * coreBoost));
+
+        // Alpha based on intensity and distance
+        let alpha = Math.min(1, intensity * 1.2);
+        alpha *= (1 - Math.pow(dist, 2.5) * 0.7); // Softer edges
+        alpha = Math.min(255, Math.floor(alpha * 255));
+
+        // Add Bayer dithering for retro feel
+        const threshold = BAYER4[y & 3][x & 3] / 16;
+        if (intensity < threshold * 0.1) {
+          alpha = Math.floor(alpha * 0.6);
+        }
+
+        if (alpha > 3) { // Only draw if visible
+          setPx(img, size, x, y, finalR, finalG, finalB, alpha);
+        }
+      }
+    }
+
+    // Add scattered star sparkles
+    addNebulaSparkles(img, size, seed);
+  });
+
+  textureCache[key] = tex;
+  return tex;
+}
+
+// Generate color palette for nebula based on base color
+function generateNebulaColors(r, g, b) {
+  const colors = [];
+
+  // Dark base (dust)
+  colors.push({ r: Math.floor(r * 0.2), g: Math.floor(g * 0.2), b: Math.floor(b * 0.3) });
+
+  // Mid-tone (main cloud)
+  colors.push({ r: Math.floor(r * 0.6), g: Math.floor(g * 0.6), b: Math.floor(b * 0.7) });
+
+  // Bright (illuminated gas)
+  colors.push({ r: r, g: g, b: b });
+
+  // Core glow (brighter)
+  colors.push({
+    r: Math.min(255, Math.floor(r * 1.3)),
+    g: Math.min(255, Math.floor(g * 1.2)),
+    b: Math.min(255, Math.floor(b * 1.4))
+  });
+
+  // Hot core (almost white)
+  colors.push({
+    r: Math.min(255, Math.floor(r * 1.6 + 40)),
+    g: Math.min(255, Math.floor(g * 1.5 + 30)),
+    b: Math.min(255, Math.floor(b * 1.7 + 50))
+  });
+
+  return colors;
+}
+
+// Add sparkle stars within the nebula
+function addNebulaSparkles(img, size, seed) {
+  const numSparkles = 8 + (seed % 5);
+  const rng = mulberry32(seed);
+
+  for (let i = 0; i < numSparkles; i++) {
+    const angle = rng() * Math.PI * 2;
+    const dist = rng() * 0.7 + 0.1;
+    const sx = Math.floor(size / 2 + Math.cos(angle) * dist * size / 2);
+    const sy = Math.floor(size / 2 + Math.sin(angle) * dist * size / 2);
+
+    // Star brightness based on position
+    const brightness = 200 + Math.floor(rng() * 55);
+
+    // 4-pointed star pattern
+    setPx(img, size, sx, sy, 255, 255, 255, brightness);
+    if (rng() > 0.3) setPx(img, size, sx + 1, sy, 255, 255, 255, Math.floor(brightness * 0.7));
+    if (rng() > 0.3) setPx(img, size, sx - 1, sy, 255, 255, 255, Math.floor(brightness * 0.7));
+    if (rng() > 0.3) setPx(img, size, sx, sy + 1, 255, 255, 255, Math.floor(brightness * 0.7));
+    if (rng() > 0.3) setPx(img, size, sx, sy - 1, 255, 255, 255, Math.floor(brightness * 0.7));
+  }
+}
+
+// Simple hash function for deterministic seeds
+function colorHash(hex) {
+  let hash = 0;
+  const str = hex.toString();
+  for (let i = 0; i < str.length; i++) {
+    const char = str.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash = hash & hash; // Convert to 32-bit integer
+  }
+  return Math.abs(hash);
+}
+
+// Simple seeded RNG (Mulberry32)
+function mulberry32(a) {
+  return function() {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+// Star: tight bright core + 4-pointed pixel cross + small halo
+function makeStarTex(colorHex) {
+  const key = 'star_' + colorHex;
+  if (textureCache[key]) return textureCache[key];
+  const { r, g, b } = hexToRgb(colorHex);
+  const size = 32;
+  const tex = makePixelTexture(size, (img) => {
+    const cx = size / 2, cy = size / 2;
+    // soft halo with dither
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        const dx = x - cx, dy = y - cy;
+        const d = Math.sqrt(dx * dx + dy * dy) / (size / 2);
+        if (d > 1) continue;
+        const intensity = Math.pow(1 - d, 2.5);
+        const threshold = BAYER4[y & 3][x & 3] / 16;
+        if (intensity > threshold * 0.6) {
+          const a = Math.floor(intensity * 200);
+          setPx(img, size, x, y, r, g, b, a);
+        }
+      }
+    }
+    // 4-pointed cross spike
+    for (let i = -6; i <= 6; i++) {
+      const fade = 1 - Math.abs(i) / 7;
+      const a = Math.floor(fade * 180);
+      setPx(img, size, cx + i, cy, 255, 255, 255, a);
+      setPx(img, size, cx, cy + i, 255, 255, 255, a);
+    }
+    // hot core 2x2
+    setPx(img, size, cx,     cy,     255, 255, 255, 255);
+    setPx(img, size, cx - 1, cy,     255, 255, 255, 255);
+    setPx(img, size, cx,     cy - 1, 255, 255, 255, 255);
+    setPx(img, size, cx - 1, cy - 1, 255, 255, 255, 255);
+  });
+  textureCache[key] = tex;
+  return tex;
+}
+
+// Planet: tiny lit hemisphere
+function makePlanetTex(colorHex) {
+  const key = 'planet_' + colorHex;
+  if (textureCache[key]) return textureCache[key];
+  const { r, g, b } = hexToRgb(colorHex);
+  const size = 16;
+  const tex = makePixelTexture(size, (img) => {
+    const cx = size / 2 - 0.5, cy = size / 2 - 0.5;
+    const radius = size / 2 - 1;
+    // light from upper-left
+    const lx = -0.5, ly = -0.5;
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        const dx = x - cx, dy = y - cy;
+        const d = Math.sqrt(dx * dx + dy * dy);
+        if (d > radius) continue;
+        // fake sphere normal lighting
+        const nx = dx / radius, ny = dy / radius;
+        const dot = Math.max(0, -(nx * lx + ny * ly));
+        const light = 0.35 + dot * 0.85;
+        // quantize to 4 shade levels (true pixel-art lighting)
+        const q = Math.floor(light * 4) / 4;
+        setPx(img, size, x, y,
+          Math.min(255, Math.floor(r * q + 30)),
+          Math.min(255, Math.floor(g * q + 30)),
+          Math.min(255, Math.floor(b * q + 30)),
+          255);
+      }
+    }
+    // single highlight pixel
+    setPx(img, size, (cx - 2) | 0, (cy - 2) | 0, 255, 255, 255, 255);
+  });
+  textureCache[key] = tex;
+  return tex;
+}
+
+// Background starfield point — tiny pixel cross
+function makeStarfieldPointTex() {
+  if (textureCache.bgstar) return textureCache.bgstar;
+  const size = 8;
+  const tex = makePixelTexture(size, (img) => {
+    const c = size / 2;
+    setPx(img, size, c,     c,     255, 255, 255, 255);
+    setPx(img, size, c - 1, c,     255, 255, 255, 180);
+    setPx(img, size, c + 1, c,     255, 255, 255, 180);
+    setPx(img, size, c,     c - 1, 255, 255, 255, 180);
+    setPx(img, size, c,     c + 1, 255, 255, 255, 180);
+  });
+  textureCache.bgstar = tex;
+  return tex;
+}
+
+// ──── star field ───────────────────────────────────────────────────────────
+function addStarField() {
+  const geo = new THREE.BufferGeometry();
+  const count = 1800;
+  const pos = new Float32Array(count * 3);
+  const col = new Float32Array(count * 3);
+  for (let i = 0; i < count; i++) {
+    pos[i * 3]     = (Math.random() - 0.5) * 1600;
+    pos[i * 3 + 1] = (Math.random() - 0.5) * 1600;
+    pos[i * 3 + 2] = (Math.random() - 0.5) * 1600;
+    // mostly white, sprinkle blue/yellow tints
+    const tint = Math.random();
+    if (tint < 0.7)      { col[i*3]=1.0; col[i*3+1]=1.0; col[i*3+2]=1.0; }
+    else if (tint < 0.85){ col[i*3]=0.7; col[i*3+1]=0.8; col[i*3+2]=1.0; }
+    else                 { col[i*3]=1.0; col[i*3+1]=0.95; col[i*3+2]=0.7; }
+  }
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  geo.setAttribute('color',    new THREE.BufferAttribute(col, 3));
+  const mat = new THREE.PointsMaterial({
+    size: 2.2,
+    map: makeStarfieldPointTex(),
+    vertexColors: true,
+    transparent: true,
+    alphaTest: 0.1,
+    sizeAttenuation: true,
+    depthWrite: false,
+  });
+  scene.add(new THREE.Points(geo, mat));
+}
+
+// ──── color helpers ────────────────────────────────────────────────────────
+function projectColor(lastActive) {
+  if (!lastActive) return 0x6e7681;
+  const now = Date.now();
+  const dt = now - new Date(lastActive).getTime();
+  const days = dt / 86400000;
+  if (days < 3) return 0x3fb950;
+  if (days < 14) return 0xd29922;
+  return 0x6e7681;
+}
+
+function outcomeColor(outcome) {
+  if (outcome === 'completed') return 0x3fb950;
+  if (outcome === 'partial')   return 0xd29922;
+  return 0x6e7681;
+}
+
+function fmtDate(ts) {
+  if (!ts) return '';
+  try { return new Date(ts).toLocaleDateString(); } catch { return ts; }
+}
+
+function escapeHTML(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+// ──── Universe view with auto-scaling layout ────────────────────────────────
+function buildUniverseView() {
+  clearMeshes();
+  currentView = 'universe';
+  backBtn.style.display = 'none';
+  projectLabel.style.display = 'none';
+
+  addStarField();
+
+  const projects = Object.values(wsData.projects || {});
+  if (!projects.length) { emptyMsg.style.display = 'block'; return; }
+  emptyMsg.style.display = 'none';
+
+  // Calculate layout with auto-scaling
+  const layout = calculateProjectLayout(projects);
+
+  // Generate nebulae with progress tracking
+  const totalProjects = projects.length;
+  const batchSize = 5; // Process in batches to avoid blocking UI
+
+  function processBatch(startIdx) {
+    const endIdx = Math.min(startIdx + batchSize, totalProjects);
+
+    for (let i = startIdx; i < endIdx; i++) {
+      const proj = projects[i];
+      const layoutInfo = layout.positions[i];
+      const { radius, position } = layoutInfo;
+
+      const color = projectColor(proj.last_active);
+      // Realistic nebula texture with multi-layered noise
+      const tex = makeNebulaTex(color);
+      const mat = new THREE.SpriteMaterial({
+        map: tex,
+        transparent: true,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+      });
+      const mesh = new THREE.Sprite(mat);
+      const spriteScale = radius * 4.5;
+      mesh.scale.set(spriteScale, spriteScale, 1);
+      mesh.position.set(position.x, position.y, position.z);
+      mesh.userData = { type: 'project', proj, radius, baseScale: spriteScale };
+      scene.add(mesh);
+      projectMeshes.push(mesh);
+    }
+
+    // Update progress
+    updateLoadingProgress(endIdx, totalProjects, 'Generating nebulae...');
+
+    // Process next batch or finish
+    if (endIdx < totalProjects) {
+      requestAnimationFrame(() => processBatch(endIdx));
+    } else {
+      finishUniverseBuild(layout);
+    }
+  }
+
+  // Start batch processing
+  processBatch(0);
+}
+
+function finishUniverseBuild(layout) {
+  // Sprites are unlit — ambient light not needed, but kept minimal in case
+  // future hover variants use lit materials.
+  scene.add(new THREE.AmbientLight(0xffffff, 1.0));
+
+  // Auto-adjust camera based on layout bounds
+  adjustCameraForLayout(layout.bounds);
+
+  // Store layout info for resize handling
+  currentLayout = layout;
+
+  // Hide loading overlay
+  const loadingOverlay = document.getElementById('loading-overlay');
+  loadingOverlay.classList.remove('visible');
+
+  console.log(`Universe build complete: ${projectMeshes.length} nebulae`);
+}
+
+// Calculate project layout with auto-scaling and collision avoidance
+function calculateProjectLayout(projects) {
+  const numProjects = projects.length;
+
+  // Calculate individual project sizes
+  const projectSizes = projects.map(proj => {
+    const msgs = Math.max(proj.total_messages || 1, 1);
+    return Math.log(msgs + 1) * 2.5; // Base radius
+  });
+
+  // Calculate total "area" needed
+  const totalArea = projectSizes.reduce((sum, r) => sum + Math.PI * r * r, 0);
+
+  // Calculate base spacing based on number of projects
+  // More projects = tighter packing, but with minimum spacing
+  const baseSpacing = Math.max(12, 30 - numProjects * 0.3);
+
+  // Calculate optimal arrangement radius
+  // This ensures projects fill the available space without overlap
+  const arrangementRadius = Math.sqrt(totalArea / Math.PI) * 3.5 + baseSpacing;
+
+  // Generate positions using golden angle spiral
+  // This provides good distribution without clustering
+  // Spindle (fusiform) shape: wide in the middle, tapered at the ends
+  const positions = [];
+  const goldenAngle = Math.PI * (3 - Math.sqrt(5)); // ~137.5 degrees
+  const spindleHeight = arrangementRadius * 0.7; // Max Y spread at center
+
+  for (let i = 0; i < numProjects; i++) {
+    const radius = projectSizes[i];
+
+    // Golden angle spiral with dynamic spacing
+    const angle = i * goldenAngle;
+    const distance = Math.sqrt(i / numProjects) * arrangementRadius;
+
+    // Add controlled variation based on project properties
+    const variationSeed = colorHash(projects[i].name || i.toString());
+    const variation = mulberry32(variationSeed);
+    const angleVariation = (variation() - 0.5) * 0.3;
+    const distVariation = 1 + (variation() - 0.5) * 0.2;
+
+    const finalAngle = angle + angleVariation;
+    const finalDistance = distance * distVariation;
+
+    // Convert to 3D coordinates
+    const x = Math.cos(finalAngle) * finalDistance;
+    const z = Math.sin(finalAngle) * finalDistance;
+
+    // Spindle Y distribution: sin(π * t) where t = normalized distance from center
+    // This creates a fusiform shape — zero at poles, max at equator
+    const t = Math.min(1, finalDistance / arrangementRadius);
+    const spindleFactor = Math.sin(Math.PI * t);
+    const y = (variation() - 0.5) * spindleHeight * spindleFactor;
+
+    positions.push({
+      radius: radius,
+      position: { x, y, z },
+      distanceFromCenter: finalDistance
+    });
+  }
+
+  // Calculate bounds for camera adjustment
+  const maxX = Math.max(...positions.map(p => Math.abs(p.position.x) + p.radius * 2));
+  const maxZ = Math.max(...positions.map(p => Math.abs(p.position.z) + p.radius * 2));
+  const maxY = Math.max(...positions.map(p => Math.abs(p.position.y) + p.radius));
+
+  const bounds = {
+    x: maxX,
+    y: maxY,
+    z: maxZ,
+    radius: Math.sqrt(maxX * maxX + maxZ * maxZ)
+  };
+
+  return {
+    positions,
+    bounds,
+    arrangementRadius
+  };
+}
+
+// Adjust camera to fit the layout
+function adjustCameraForLayout(bounds) {
+  const fov = camera.fov * (Math.PI / 180);
+  const aspect = camera.aspect;
+
+  // Calculate required distance to see all projects
+  const distanceX = bounds.x / Math.tan(fov / 2) / aspect;
+  const distanceZ = bounds.z / Math.tan(fov / 2);
+
+  const requiredDistance = Math.max(distanceX, distanceZ) * 1.6; // 60% padding
+
+  // Set camera — slightly elevated to show spindle depth
+  camera.position.set(0, requiredDistance * 0.3, requiredDistance * 0.8);
+  controls.target.set(0, -15, 0);
+  controls.update();
+}
+
+// ──── Solar System view ────────────────────────────────────────────────────
+function buildSolarView(proj) {
+  clearMeshes();
+  currentView = 'solar';
+  currentProject = proj;
+  backBtn.style.display = 'inline-block';
+  projectLabel.textContent = proj.title || proj.name;
+  projectLabel.style.display = 'inline';
+
+  addStarField();
+
+  // Center label sprite
+  const label = proj.title || proj.name;
+  const subCount = proj._subKeys ? proj._subKeys.length : 1;
+  const centerLabel = subCount > 1 ? `${label} (${subCount} folders)` : label;
+  addTextSprite(centerLabel, new THREE.Vector3(0, 12, 0), 1.2);
+
+  const analyzed = Object.entries(proj.analyzed_sessions || {});
+  if (!analyzed.length) {
+    addTextSprite('No analyzed sessions', new THREE.Vector3(0, 0, 0), 0.8);
+    scene.add(new THREE.AmbientLight(0x304060, 2));
+    camera.position.set(0, 20, 60);
+    controls.target.set(0, 0, 0);
+    controls.update();
+    return;
+  }
+
+  // Sort: newest first (closest to center)
+  analyzed.sort((a, b) => {
+    const ta = a[1].ts || '';
+    const tb = b[1].ts || '';
+    return tb.localeCompare(ta);
+  });
+
+  const n = analyzed.length;
+  const spiralStep = 6;
+
+  analyzed.forEach(([sid, session], i) => {
+    const msgs = session.msg_count || 20;
+    const starRadius = Math.max(0.6, Math.log(msgs + 1) * 0.6);
+
+    // Spiral position
+    const arm = spiralStep * (i + 1);
+    const angle = i * 2.4;
+    const x = Math.cos(angle) * arm;
+    const z = Math.sin(angle) * arm;
+    const y = (Math.random() - 0.5) * 4;
+
+    const color = outcomeColor(session.outcome);
+    // Pixel star sprite — hot 2x2 core + 4-pointed cross + dithered halo
+    const starMat = new THREE.SpriteMaterial({
+      map: makeStarTex(color),
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    });
+    const mesh = new THREE.Sprite(starMat);
+    const starScale = starRadius * 5;
+    mesh.scale.set(starScale, starScale, 1);
+    mesh.position.set(x, y, z);
+    mesh.userData = { type: 'session', sid, session, proj, baseScale: starScale };
+    scene.add(mesh);
+    starMeshes.push(mesh);
+
+    // Planets = key_tools (small pixel-shaded spheres)
+    const tools = session.key_tools || [];
+    tools.slice(0, 5).forEach((tool, ti) => {
+      const orbitR = starRadius + 1.5 + ti * 0.8;
+      const planetMat = new THREE.SpriteMaterial({
+        map: makePlanetTex(0x58a6ff),
+        transparent: true,
+        depthWrite: false,
+      });
+      const planet = new THREE.Sprite(planetMat);
+      planet.scale.set(0.9, 0.9, 1);
+      planet.userData = { type: 'planet' };
+      scene.add(planet);
+      planetMeshes.push(planet);
+      planetOrbits.push({
+        mesh: planet,
+        star: mesh,
+        radius: orbitR,
+        speed: 0.3 + ti * 0.1,
+        angle: (ti / tools.length) * Math.PI * 2,
+        yOff: y,
+      });
+    });
+  });
+
+  scene.add(new THREE.AmbientLight(0xffffff, 1.0));
+
+  const maxDist = spiralStep * (n + 1);
+  camera.position.set(0, maxDist * 0.5, maxDist * 1.2);
+  controls.target.set(0, 0, 0);
+  controls.update();
+}
+
+// ──── text sprite (pixel-crisp) ────────────────────────────────────────────
+function addTextSprite(text, pos, scale) {
+  const canvas2 = document.createElement('canvas');
+  canvas2.width = 512; canvas2.height = 64;
+  const ctx = canvas2.getContext('2d');
+  ctx.imageSmoothingEnabled = false;
+  ctx.clearRect(0, 0, 512, 64);
+  // pixel-style stroke + fill for a chunky bitmap-font feel
+  ctx.font = 'bold 32px "Courier New", monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.lineWidth = 4;
+  ctx.strokeStyle = '#000000';
+  ctx.strokeText(text, 256, 32);
+  ctx.fillStyle = '#c9d1d9';
+  ctx.fillText(text, 256, 32);
+  const tex = new THREE.CanvasTexture(canvas2);
+  tex.magFilter = THREE.NearestFilter;
+  tex.minFilter = THREE.NearestFilter;
+  tex.generateMipmaps = false;
+  const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false });
+  const sprite = new THREE.Sprite(mat);
+  sprite.position.copy(pos);
+  sprite.scale.set(20 * scale, 2.5 * scale, 1);
+  sprite.userData = { type: 'label' };
+  scene.add(sprite);
+}
+
+// ──── cleanup ──────────────────────────────────────────────────────────────
+function clearMeshes() {
+  // Dispose all objects except the renderer
+  while (scene && scene.children.length) {
+    const obj = scene.children[0];
+    scene.remove(obj);
+    if (obj.geometry) obj.geometry.dispose();
+    if (obj.material) {
+      if (obj.material.map) obj.material.map.dispose();
+      obj.material.dispose();
+    }
+  }
+  projectMeshes = [];
+  starMeshes = [];
+  planetMeshes = [];
+  planetOrbits = [];
+  hoveredMesh = null;
+  closePanel();
+}
+
+// ──── panel ────────────────────────────────────────────────────────────────
+function openPanel(session, sid) {
+  document.getElementById('panel-title').textContent = sid.slice(0, 12) + '…';
+  document.getElementById('panel-goal').textContent = session.user_goal || '';
+  document.getElementById('panel-summary').textContent = session.summary || '';
+  const oc = session.outcome || 'partial';
+  document.getElementById('panel-outcome').innerHTML =
+    `<span class="outcome-badge outcome-${oc}">${oc}</span>`;
+  document.getElementById('panel-tools').textContent = (session.key_tools || []).join(', ') || '—';
+  document.getElementById('panel-ts').textContent = fmtDate(session.ts);
+  sidePanel.classList.add('open');
+}
+
+function closePanel() {
+  sidePanel.classList.remove('open');
+}
+
+document.getElementById('close-panel').addEventListener('click', closePanel);
+
+// ──── interaction ──────────────────────────────────────────────────────────
+function onMouseMove(e) {
+  const rect = renderer.domElement.getBoundingClientRect();
+  mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+  mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+
+  raycaster.setFromCamera(mouse, camera);
+  const targets = currentView === 'universe' ? projectMeshes : starMeshes;
+  const hits = raycaster.intersectObjects(targets);
+
+  if (hits.length) {
+    const mesh = hits[0].object;
+    if (mesh !== hoveredMesh) {
+      if (hoveredMesh) resetGlow(hoveredMesh);
+      hoveredMesh = mesh;
+      boostGlow(mesh);
+    }
+    showTooltip(e, mesh);
+    document.getElementById('canvas-wrap').style.cursor = 'pointer';
+  } else {
+    if (hoveredMesh) { resetGlow(hoveredMesh); hoveredMesh = null; }
+    tooltip.style.display = 'none';
+    document.getElementById('canvas-wrap').style.cursor = '';
+  }
+}
+
+function showTooltip(e, mesh) {
+  const ud = mesh.userData;
+  let html = '';
+  if (ud.type === 'project') {
+    const p = ud.proj;
+    const displayName = p.title || p.name;
+    const tags = (p.tags || []).map(t => `<span class="tt-tag">${escapeHTML(t)}</span>`).join(' ');
+    const totalSessions = p._totalSessions || Object.keys(p.analyzed_sessions || {}).length;
+    const folders = p._subKeys || [p.name];
+    const folderLine = folders.length > 1 ? `${folders.length} 个文件夹` : `文件夹: ${escapeHTML(folders[0])}`;
+    html = `<div class="tt-name">${escapeHTML(displayName)}</div>
+    <div class="tt-meta">
+      ${tags ? tags + '<br>' : ''}
+      ${folderLine}<br>
+      ${totalSessions} sessions<br>
+      Last active: ${escapeHTML(fmtDate(p.last_active))}<br>
+      Messages: ${p.total_messages || 0}
+    </div>`;
+  } else if (ud.type === 'session') {
+    const s = ud.session;
+    html = `<div class="tt-name">${escapeHTML(ud.sid.slice(0, 12))}…</div>
+    <div class="tt-meta">
+      ${escapeHTML(s.user_goal || '')}<br>
+      Outcome: ${escapeHTML(s.outcome || '')}<br>
+      ${escapeHTML(fmtDate(s.ts))}
+    </div>`;
+  }
+  tooltip.innerHTML = html;
+  tooltip.style.display = 'block';
+  const x = e.clientX + 14;
+  const y = e.clientY - 10;
+  tooltip.style.left = x + 'px';
+  tooltip.style.top = y + 'px';
+}
+
+function boostGlow(mesh) {
+  // Sprites: scale up. Meshes (legacy): bump emissive.
+  if (mesh.isSprite && mesh.userData.baseScale) {
+    const s = mesh.userData.baseScale * 1.25;
+    mesh.scale.set(s, s, 1);
+  } else if (mesh.material && 'emissiveIntensity' in mesh.material) {
+    mesh.userData._prevEmissive = mesh.material.emissiveIntensity;
+    mesh.material.emissiveIntensity = 1.2;
+  }
+}
+
+function resetGlow(mesh) {
+  if (mesh.isSprite && mesh.userData.baseScale) {
+    const s = mesh.userData.baseScale;
+    mesh.scale.set(s, s, 1);
+  } else if (mesh.material && mesh.userData._prevEmissive !== undefined) {
+    mesh.material.emissiveIntensity = mesh.userData._prevEmissive;
+  }
+}
+
+function onClick(e) {
+  if (!hoveredMesh) return;
+  const ud = hoveredMesh.userData;
+
+  if (ud.type === 'project' && currentView === 'universe') {
+    // Animate camera closer then switch view
+    const target = hoveredMesh.position.clone();
+    animateCameraTo(target, () => buildSolarView(ud.proj));
+  } else if (ud.type === 'session' && currentView === 'solar') {
+    openPanel(ud.session, ud.sid);
+  }
+}
+
+function animateCameraTo(target, callback) {
+  controls.enabled = false;
+  const start = camera.position.clone();
+  const end = target.clone().add(new THREE.Vector3(0, 5, 30));
+  const startTarget = controls.target.clone();
+  let t = 0;
+  function step() {
+    t += 0.04;
+    if (t >= 1) {
+      callback();
+      controls.enabled = true;
+      return;
+    }
+    const ease = t < 0.5 ? 2*t*t : -1+(4-2*t)*t;
+    camera.position.lerpVectors(start, end, ease);
+    controls.target.lerpVectors(startTarget, target, ease);
+    controls.update();
+    requestAnimationFrame(step);
+  }
+  requestAnimationFrame(step);
+}
+
+backBtn.addEventListener('click', () => {
+  buildUniverseView();
+  camera.position.set(0, 30, 120);
+  controls.target.set(0, 0, 0);
+});
+
+// ──── animate ──────────────────────────────────────────────────────────────
+let clock;
+
+function animate() {
+  animFrame = requestAnimationFrame(animate);
+  const dt = clock.getDelta();
+
+  // Orbit planets
+  planetOrbits.forEach(o => {
+    o.angle += o.speed * dt;
+    const sx = o.star.position.x;
+    const sy = o.star.position.y;
+    const sz = o.star.position.z;
+    o.mesh.position.set(
+      sx + Math.cos(o.angle) * o.radius,
+      sy + Math.sin(o.angle * 0.3) * 0.5,
+      sz + Math.sin(o.angle) * o.radius
+    );
+  });
+
+  controls.update();
+  renderer.render(scene, camera);
+}
+
+// ──── Progress tracking ────────────────────────────────────────────────────
+function updateLoadingProgress(current, total, status) {
+  const loadingOverlay = document.getElementById('loading-overlay');
+  const progress = Math.round((current / total) * 100);
+  loadingOverlay.textContent = `${status} ${progress}%`;
+}
+
+// ──── bootstrap ────────────────────────────────────────────────────────────
+async function main() {
+  const loadingOverlay = document.getElementById('loading-overlay');
+  const perfStats = document.getElementById('perf-stats');
+
+  // Show loading indicator
+  loadingOverlay.classList.add('visible');
+
+  const startTime = performance.now();
+
+  const mod = await import('/three.module.min.js');
+  THREE = mod;
+
+  // Minimal orbit controls (replaces OrbitControls)
+  OrbitControls = class {
+    constructor(cam, domEl) {
+      this.camera = cam;
+      this.target = new THREE.Vector3();
+      this.enabled = true;
+      this.enableDamping = false;
+      this.dampingFactor = 0.08;
+      this._spherical = { theta: 0, phi: Math.PI / 2, radius: 120 };
+      this._dragging = false;
+      this._last = { x: 0, y: 0 };
+      const s = this._spherical;
+      const updateCamera = () => {
+        cam.position.set(
+          s.radius * Math.sin(s.phi) * Math.sin(s.theta),
+          s.radius * Math.cos(s.phi),
+          s.radius * Math.sin(s.phi) * Math.cos(s.theta)
+        );
+        cam.lookAt(this.target);
+      };
+      // Sync spherical state from current camera position
+      const syncFromCamera = () => {
+        const dx = cam.position.x - this.target.x;
+        const dy = cam.position.y - this.target.y;
+        const dz = cam.position.z - this.target.z;
+        s.radius = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        s.phi = Math.acos(Math.max(-1, Math.min(1, dy / s.radius)));
+        s.theta = Math.atan2(dx, dz);
+      };
+      domEl.addEventListener('mousedown', e => {
+        if (!this.enabled) return;
+        syncFromCamera();
+        this._dragging = true; this._last = { x: e.clientX, y: e.clientY };
+      });
+      window.addEventListener('mouseup', () => { this._dragging = false; });
+      window.addEventListener('mousemove', e => {
+        if (!this.enabled || !this._dragging) return;
+        const dx = e.clientX - this._last.x, dy = e.clientY - this._last.y;
+        s.theta -= dx * 0.005;
+        s.phi = Math.max(0.1, Math.min(Math.PI - 0.1, s.phi + dy * 0.005));
+        this._last = { x: e.clientX, y: e.clientY };
+        updateCamera();
+      });
+      domEl.addEventListener('wheel', e => {
+        if (!this.enabled) return;
+        syncFromCamera();
+        s.radius = Math.max(20, Math.min(400, s.radius + e.deltaY * 0.1));
+        updateCamera();
+      });
+      this.update = () => {};
+    }
+  };
+
+  initRenderer();
+  makeScene();
+  clock = new THREE.Clock();
+  renderer.domElement.addEventListener('mousemove', onMouseMove);
+  renderer.domElement.addEventListener('click', onClick);
+  animate();
+
+  try {
+    const resp = await fetch('/api/workspace');
+    if (!resp.ok) throw new Error('fetch failed');
+    const data = await resp.json();
+    if (!data || !data.projects || !Object.keys(data.projects).length) {
+      emptyMsg.style.display = 'block';
+      loadingOverlay.classList.remove('visible');
+      return;
+    }
+    wsData = data;
+
+    // Merge projects with the same title
+    const rawProjects = Object.values(data.projects);
+    const mergeMap = {};
+    for (const p of rawProjects) {
+      const key = p.title || p.name;
+      if (!mergeMap[key]) {
+        mergeMap[key] = { ...p, _subKeys: [p.name], _totalSessions: Object.keys(p.analyzed_sessions || {}).length };
+      } else {
+        const m = mergeMap[key];
+        m._subKeys.push(p.name);
+        m._totalSessions += Object.keys(p.analyzed_sessions || {}).length;
+        Object.assign(m.analyzed_sessions, p.analyzed_sessions || {});
+        m.sessions = (m.sessions || []).concat(p.sessions || []);
+        m.total_messages = (m.total_messages || 0) + (p.total_messages || 0);
+        m.total_tool_calls = (m.total_tool_calls || 0) + (p.total_tool_calls || 0);
+        if ((p.last_active || '') > (m.last_active || '')) m.last_active = p.last_active;
+        if (p.first_seen && (!m.first_seen || p.first_seen < m.first_seen)) m.first_seen = p.first_seen;
+      }
+    }
+    data.projects = mergeMap;
+    const projects = Object.values(mergeMap);
+    console.log(`Generating ${projects.length} nebulae (merged from ${rawProjects.length} folders)...`);
+
+    // buildUniverseView will handle hiding the loading overlay
+    buildUniverseView();
+
+    // Show performance stats (delayed to allow batch processing)
+    setTimeout(() => {
+      const loadTime = performance.now() - startTime;
+      perfStats.textContent = `Loaded in ${loadTime.toFixed(0)}ms • ${projects.length} nebulae`;
+      perfStats.style.display = 'block';
+
+      // Auto-hide stats after 3 seconds
+      setTimeout(() => {
+        perfStats.style.display = 'none';
+      }, 3000);
+    }, 100);
+
+  } catch (err) {
+    emptyMsg.style.display = 'block';
+    emptyMsg.innerHTML = 'Could not load workspace data.<br><a href="/">← Dashboard</a>';
+    console.error('Workspace load error:', err);
+    loadingOverlay.classList.remove('visible');
+  }
+}
+
+main();
+</script>
+</body>
+</html>

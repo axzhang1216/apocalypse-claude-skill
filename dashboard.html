@@ -51,10 +51,11 @@
   .msg.assistant .bubble { background: var(--assistant-bg); border: 1px solid #2c4458; }
   .msg.thinking .bubble { background: #1a1a2e; border: 1px dashed #4a4a6e; color: var(--muted); font-style: italic; }
   .msg.tool { margin-right: auto; max-width: 95%; }
-  .tool-card { background: var(--tool-bg); border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
-  .tool-head { padding: 6px 10px; background: var(--bg3); cursor: pointer; display: flex; justify-content: space-between; align-items: center; }
-  .tool-head .tool-name { color: var(--blue); font-weight: 600; }
-  .tool-head .tool-arrow { color: var(--muted); transition: transform 0.15s; }
+  .tool-card { background: var(--tool-bg); border: 1px solid var(--border); border-radius: 4px; overflow: hidden; }
+  .tool-head { padding: 4px 10px; background: var(--bg3); cursor: pointer; display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .tool-head .tool-name { color: var(--blue); font-weight: 600; font-size: 12px; white-space: nowrap; }
+  .tool-head .tool-preview { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+  .tool-head .tool-arrow { color: var(--muted); transition: transform 0.15s; font-size: 11px; flex-shrink: 0; }
   .tool-card.expanded .tool-head .tool-arrow { transform: rotate(90deg); }
   .tool-body { display: none; padding: 8px 10px; border-top: 1px solid var(--border); }
   .tool-card.expanded .tool-body { display: block; }
@@ -63,6 +64,8 @@
   .tool-section-label { font-size: 11px; color: var(--muted); margin-bottom: 3px; text-transform: uppercase; letter-spacing: 0.05em; }
   .tool-content { white-space: pre-wrap; word-break: break-word; font-size: 13px; background: var(--bg); padding: 6px 8px; border-radius: 4px; max-height: 300px; overflow-y: auto; }
   .tool-content.error { color: var(--red); }
+  .msg .role-label.user-label { color: var(--green); }
+  .msg .role-label.assistant-label { color: var(--blue); }
   .msg .ts { font-size: 11px; color: var(--muted); margin-top: 3px; }
   #empty { color: var(--muted); padding: 40px; text-align: center; }
   .copy-toast { position: fixed; bottom: 20px; right: 20px; background: var(--bg3); border: 1px solid var(--green); color: var(--green); padding: 8px 14px; border-radius: 6px; font-size: 13px; opacity: 0; transition: opacity 0.2s; pointer-events: none; z-index: 1000; }
@@ -74,6 +77,7 @@
 <header>
   <h1>🌋 Apocalypse</h1>
   <div style="color: var(--muted); font-size: 12px;">live transcript view</div>
+  <a href="/workspace.html" style="margin-left: auto; color: var(--muted); text-decoration: none; font-size: 13px; padding: 4px 10px; border: 1px solid var(--border); border-radius: 4px;" onmouseover="this.style.color='var(--text)';this.style.background='var(--bg3)'" onmouseout="this.style.color='var(--muted)';this.style.background='transparent'">🌌 Workspace</a>
 </header>
 
 <div class="layout">
@@ -232,14 +236,14 @@ function buildExportText(msgs) {
     const head = stamp ? '[' + stamp + '] ' : '';
     const role = m.role || 'user';
     if (role === 'tool') {
-      const lines = [head + 'Tool: ' + (m.tool || '(tool)')];
-      if (m.input != null && m.input !== '') lines.push('Input: ' + m.input);
-      if (m.output != null && m.output !== '') {
-        lines.push('Output' + (m.is_error ? ' (error)' : '') + ': ' + m.output);
+      const lines = [head + '→ ' + (m.tool || '(tool)')];
+      if (m.input != null && m.input !== '') {
+        const firstLine = m.input.split('\n')[0].trim();
+        lines.push('  ' + (firstLine.length > 100 ? firstLine.slice(0, 100) + '…' : firstLine));
       }
       return lines.join('\n');
     }
-    const label = role.charAt(0).toUpperCase() + role.slice(1);
+    const label = role === 'user' ? 'User' : (role === 'assistant' ? 'Claude' : role);
     return head + label + '\n' + (m.text || '');
   }).join('\n\n') + '\n';
 }
@@ -268,13 +272,20 @@ function msgHTML(m) {
   if (role === 'tool') {
     const hasOutput = m.output != null && m.output !== '';
     const errClass = m.is_error ? ' error' : '';
+    const toolName = escapeHTML(m.tool || '(tool)');
+    // One-line preview: tool name + truncated input
+    let preview = '';
+    if (m.input) {
+      const firstLine = m.input.split('\n')[0].trim();
+      preview = firstLine.length > 80 ? firstLine.slice(0, 80) + '…' : firstLine;
+    }
     return `
       <div class="msg tool">
-        <div class="role-label">tool</div>
         <div class="tool-card">
           <div class="tool-head">
-            <div class="tool-name">${escapeHTML(m.tool || '(tool)')}</div>
-            <div class="tool-arrow">▶</div>
+            <span class="tool-name">${toolName}</span>
+            <span class="tool-preview">${escapeHTML(preview)}</span>
+            <span class="tool-arrow">▶</span>
           </div>
           <div class="tool-body">
             ${m.input ? `<div class="tool-section">
@@ -290,9 +301,11 @@ function msgHTML(m) {
         <div class="ts">${escapeHTML(fmtTime(m.ts))}</div>
       </div>`;
   }
+  const labelClass = role === 'user' ? 'user-label' : (role === 'assistant' ? 'assistant-label' : '');
+  const label = role === 'user' ? 'User' : (role === 'assistant' ? 'Claude' : role);
   return `
     <div class="msg ${escapeHTML(role)}">
-      <div class="role-label">${escapeHTML(role)}</div>
+      <div class="role-label ${labelClass}">${escapeHTML(label)}</div>
       <div class="bubble">${escapeHTML(m.text || '')}</div>
       <div class="ts">${escapeHTML(fmtTime(m.ts))}</div>
     </div>`;
