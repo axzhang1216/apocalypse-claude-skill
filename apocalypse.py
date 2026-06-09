@@ -698,60 +698,98 @@ def update_workspace():
         print(f"  {DIM}没有新的 session 需要分析。{RESET}")
         return
 
-    print(f"  {GREEN}分析完成：{total_new} 个新 session，{len(project_evts)} 个项目有更新\n{RESET}")
+    # Step 2: Load updated workspace and show detailed changes
+    ws = _load_workspace()
+    print(f"\n  {GREEN}分析完成：{total_new} 个新 session，{len(project_evts)} 个项目有更新{RESET}\n")
 
-    # Step 2: Check for projects needing themes
+    # Group new sessions by project and show details
+    for evt in project_evts:
+        proj_name = evt.get("project", "")
+        new_count = evt.get("sessions", 0)
+        # Find this project in workspace.json to get session details
+        proj_record = None
+        proj_title = proj_name
+        for key, p in ws.get("projects", {}).items():
+            if p.get("name") == proj_name:
+                proj_record = p
+                proj_title = p.get("title") or proj_name
+                break
+
+        print(f"  {BOLD}{proj_title}{RESET}  {DIM}({proj_name}){RESET}")
+        print(f"    新增 {GREEN}{new_count}{RESET} 个 session")
+
+        if proj_record:
+            # Show the newest sessions (those with ts close to now)
+            analyzed = proj_record.get("analyzed_sessions", {})
+            # Sort by timestamp descending, take the new ones
+            sorted_sids = sorted(analyzed.keys(),
+                                 key=lambda s: analyzed[s].get("ts", ""), reverse=True)
+            shown = 0
+            for sid in sorted_sids:
+                if shown >= new_count: break
+                s = analyzed[sid]
+                goal = _trunc(s.get("user_goal", ""), 65) or "(无信息)"
+                summary = _trunc(s.get("summary", ""), 55)
+                cat = s.get("category", "other")
+                cat_label = CATEGORY_LABELS.get(cat, cat)
+                print(f"    {DIM}•{RESET} {goal}")
+                print(f"      {DIM}{summary}  [{cat_label}]{RESET}")
+                shown += 1
+
+        # Show current theme status
+        title = proj_record.get("title", "") if proj_record else ""
+        tags = proj_record.get("tags", []) if proj_record else []
+        if title:
+            print(f"    {DIM}当前主题:{RESET} {title}  {DIM}标签:{RESET} {', '.join(tags) if tags else '(无)'}")
+        else:
+            print(f"    {YELLOW}⚠ 无标题和标签，需要设定{RESET}")
+        print()
+
+    # Step 3: Check for projects needing themes
     summaries = _dump_summaries()
     projects_list = summaries.get("projects", [])
-    needs_theme = []
-    for p in projects_list:
-        if not p.get("title"):
-            needs_theme.append(p)
+    needs_theme = [p for p in projects_list if not p.get("title")]
 
-    if not needs_theme:
-        print(f"  {DIM}所有项目已有标题和标签，无需更新。{RESET}")
-        return
+    if needs_theme:
+        print(f"  {BOLD}{YELLOW}以下 {len(needs_theme)} 个项目需要设定标题和标签：{RESET}\n")
+        themes_to_set = {}
+        for p in needs_theme:
+            key = p["key"]
+            analyzed = {}
+            if ws and key in ws.get("projects", {}):
+                analyzed = ws["projects"][key].get("analyzed_sessions", {})
+            auto = _auto_theme_from_categories(analyzed)
+            goals = p.get("sample_goals", [])[:2]
+            cat_bd = p.get("category_breakdown", {})
+            top_cat = max(cat_bd.items(), key=lambda x: x[1])[0] if cat_bd else "other"
 
-    # Step 3: Show new projects and auto-assign themes
-    print(f"  {BOLD}以下 {len(needs_theme)} 个项目需要设定标题和标签：{RESET}\n")
-    themes_to_set = {}
-    for p in needs_theme:
-        key = p["key"]
-        analyzed = {}
-        ws = _load_workspace()
-        if ws and key in ws.get("projects", {}):
-            analyzed = ws["projects"][key].get("analyzed_sessions", {})
-        auto = _auto_theme_from_categories(analyzed)
-        goals = p.get("sample_goals", [])[:2]
-        cat_bd = p.get("category_breakdown", {})
-        top_cat = max(cat_bd.items(), key=lambda x: x[1])[0] if cat_bd else "other"
+            print(f"  {BOLD}{p['folder_name']}{RESET}")
+            print(f"    {DIM}Sessions:{RESET} {p['session_count']}  |  {DIM}主分类:{RESET} {CATEGORY_LABELS.get(top_cat, top_cat)}")
+            if goals:
+                for g in goals:
+                    print(f"    {DIM}•{RESET} {_trunc(g, 60)}")
+            print(f"    {GREEN}建议标题:{RESET} {auto['title']}")
+            print(f"    {GREEN}建议标签:{RESET} {', '.join(auto['tags'])}")
+            print()
+            themes_to_set[key] = auto
 
-        print(f"  {BOLD}{p['folder_name']}{RESET}")
-        print(f"    {DIM}Sessions:{RESET} {p['session_count']}  |  {DIM}主分类:{RESET} {CATEGORY_LABELS.get(top_cat, top_cat)}")
-        if goals:
-            for g in goals:
-                print(f"    {DIM}•{RESET} {_trunc(g, 60)}")
-        print(f"    {GREEN}建议标题:{RESET} {auto['title']}")
-        print(f"    {GREEN}建议标签:{RESET} {', '.join(auto['tags'])}")
-        print()
-        themes_to_set[key] = auto
+        # Confirm and write
+        print(f"  {DIM}{'─' * 50}{RESET}")
+        try:
+            choice = input(f"  {BOLD}确认以上标题和标签？(Y/n/edit): {RESET}").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            choice = "n"
 
-    # Step 4: Confirm and write
-    print(f"  {DIM}{'─' * 50}{RESET}")
-    try:
-        choice = input(f"  {BOLD}确认以上标题和标签？(Y/n/edit): {RESET}").strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        choice = "n"
+        if choice == "n":
+            print(f"  {DIM}已跳过主题设定。{RESET}")
+        elif choice == "edit":
+            print(f"  {DIM}请手动编辑 workspace.json 中的 title 和 tags 字段。{RESET}")
+        else:
+            _set_themes(themes_to_set)
+            print(f"\n  {GREEN}已更新 {len(themes_to_set)} 个项目的标题和标签。{RESET}")
+    else:
+        print(f"  {DIM}所有项目已有标题和标签。{RESET}")
 
-    if choice == "n":
-        print(f"  {DIM}已跳过主题设定。{RESET}")
-        return
-    elif choice == "edit":
-        print(f"  {DIM}请手动编辑 workspace.json 中的 title 和 tags 字段。{RESET}")
-        return
-
-    _set_themes(themes_to_set)
-    print(f"\n  {GREEN}已更新 {len(themes_to_set)} 个项目的标题和标签。{RESET}")
     print(f"  {DIM}打开 http://localhost:7749/workspace.html 查看更新后的星图。{RESET}\n")
 
 
