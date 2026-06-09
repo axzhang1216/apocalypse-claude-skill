@@ -94,6 +94,34 @@
   .hm-legend { display: flex; align-items: center; gap: 4px; font-size: 10px; color: var(--muted); margin-top: 4px; justify-content: flex-end; }
   .hm-legend .hm-cell { cursor: default; }
   .hm-legend .hm-cell:hover { outline: none; }
+
+  /* ── Search ── */
+  #search-box { padding: 8px 12px; border-bottom: 1px solid var(--border); }
+  #search-input {
+    width: 100%; background: var(--bg); border: 1px solid var(--border);
+    color: var(--text); padding: 6px 10px; border-radius: 4px;
+    font-family: inherit; font-size: 13px; outline: none;
+  }
+  #search-input:focus { border-color: var(--blue); }
+  #search-input::placeholder { color: var(--grey); }
+  #search-results { display: none; border-bottom: 1px solid var(--border); max-height: 40vh; overflow-y: auto; }
+  #search-results.visible { display: block; }
+  .sr-header { padding: 8px 12px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; display: flex; justify-content: space-between; align-items: center; }
+  .sr-header button { font-size: 11px; padding: 2px 6px; background: transparent; border: 1px solid var(--border); color: var(--muted); border-radius: 3px; cursor: pointer; }
+  .sr-header button:hover { color: var(--text); background: var(--bg3); }
+  .sr-item { padding: 8px 12px; border-bottom: 1px solid var(--border); cursor: pointer; }
+  .sr-item:hover { background: var(--bg3); }
+  .sr-item .sr-proj { font-size: 11px; color: var(--blue); margin-bottom: 2px; }
+  .sr-item .sr-snippet { font-size: 12px; color: var(--muted); line-height: 1.4; }
+  .sr-item .sr-snippet mark { color: var(--yellow); background: transparent; font-weight: 600; }
+  .sr-item .sr-actions { margin-top: 4px; }
+  .sr-item .sr-open {
+    font-size: 11px; padding: 2px 8px; border: 1px solid var(--green);
+    color: var(--green); background: transparent; border-radius: 3px;
+    cursor: pointer; font-family: inherit;
+  }
+  .sr-item .sr-open:hover { background: var(--green); color: var(--bg); }
+  .sr-item .sr-open:disabled { opacity: 0.4; cursor: not-allowed; }
 </style>
 </head>
 <body>
@@ -119,6 +147,16 @@
         <span>多</span>
       </div>
       <div id="hm-tooltip"></div>
+    </div>
+    <div id="search-box">
+      <input id="search-input" type="text" placeholder="搜索 session 内容..." />
+    </div>
+    <div id="search-results">
+      <div class="sr-header">
+        <span id="sr-count"></span>
+        <button onclick="clearSearch()">清除</button>
+      </div>
+      <div id="sr-list"></div>
     </div>
     <h2>
       <span>Sessions <span id="session-count" style="color: var(--muted)"></span></span>
@@ -477,6 +515,92 @@ async function loadHeatmap() {
 }
 
 loadHeatmap();
+
+// ── Session search ──
+let searchTimer = null;
+const searchInput = document.getElementById('search-input');
+const searchResults = document.getElementById('search-results');
+const srList = document.getElementById('sr-list');
+const srCount = document.getElementById('sr-count');
+
+searchInput.addEventListener('input', () => {
+  clearTimeout(searchTimer);
+  const q = searchInput.value.trim();
+  if (!q) { clearSearch(); return; }
+  searchTimer = setTimeout(() => doSearch(q), 300);
+});
+
+searchInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') { clearSearch(); searchInput.blur(); }
+});
+
+async function doSearch(q) {
+  srList.innerHTML = '<div style="padding:8px 12px;color:var(--muted);font-size:12px">搜索中...</div>';
+  searchResults.classList.add('visible');
+  try {
+    const resp = await fetch(`/api/sessions2/search?q=${encodeURIComponent(q)}&limit=15`);
+    const results = await resp.json();
+    if (!results.length) {
+      srList.innerHTML = '<div style="padding:8px 12px;color:var(--muted);font-size:12px">没有匹配的 session</div>';
+      srCount.textContent = '0 结果';
+      return;
+    }
+    srCount.textContent = `${results.length} 个匹配`;
+    srList.innerHTML = '';
+    for (const r of results) {
+      const item = document.createElement('div');
+      item.className = 'sr-item';
+      const snippet = r.matches[0] ? highlightMatch(r.matches[0].snippet, q) : '';
+      const more = r.match_count > 1 ? `<span style="color:var(--muted);font-size:11px"> +${r.match_count - 1} 处匹配</span>` : '';
+      item.innerHTML = `
+        <div class="sr-proj">${escapeHTML(r.project_name)} · ${r.session_id.slice(0,8)}</div>
+        <div class="sr-snippet">${snippet}${more}</div>
+        <div class="sr-actions">
+          <button class="sr-open" onclick="launchSession('${r.session_id}', this)">打开</button>
+        </div>`;
+      srList.appendChild(item);
+    }
+  } catch (err) {
+    srList.innerHTML = `<div style="padding:8px 12px;color:var(--red);font-size:12px">搜索失败: ${err.message}</div>`;
+  }
+}
+
+function highlightMatch(text, query) {
+  const escaped = escapeHTML(text);
+  const re = new RegExp(`(${query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi');
+  return escaped.replace(re, '<mark>$1</mark>');
+}
+
+function clearSearch() {
+  searchResults.classList.remove('visible');
+  srList.innerHTML = '';
+  searchInput.value = '';
+}
+
+async function launchSession(sessionId, btn) {
+  btn.disabled = true;
+  btn.textContent = '打开中...';
+  try {
+    const resp = await fetch(`/api/sessions2/launch/${sessionId}`, { method: 'POST' });
+    const data = await resp.json();
+    if (data.ok) {
+      btn.textContent = '已打开';
+      btn.style.borderColor = 'var(--muted)';
+      btn.style.color = 'var(--muted)';
+    } else {
+      btn.textContent = '失败';
+      btn.disabled = false;
+    }
+  } catch (err) {
+    btn.textContent = '失败';
+    btn.disabled = false;
+  }
+}
+
+function escapeHTML(s) {
+  if (!s) return '';
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
 
 async function refreshSessions() {
   try {

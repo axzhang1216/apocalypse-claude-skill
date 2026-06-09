@@ -490,6 +490,87 @@ def workspace_status():
     }
 
 
+# ──────────────────────────── search & launch ─────────────────────────────────
+
+def search_sessions(query, limit=20):
+    """Full-text search across all session transcripts."""
+    if not PROJECTS_DIR.exists():
+        return []
+    query_lower = query.lower()
+    results = []
+    for proj_dir in PROJECTS_DIR.iterdir():
+        if not proj_dir.is_dir():
+            continue
+        for jsonl in proj_dir.glob("*.jsonl"):
+            try:
+                meta = _analyze_transcript(jsonl)
+                if not meta:
+                    continue
+                matches = []
+                cwd = meta.get("cwd", "")
+                with open(jsonl, "r", encoding="utf-8", errors="replace") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            d = json.loads(line)
+                        except Exception:
+                            continue
+                        t = d.get("type", "")
+                        if t not in ("user", "assistant"):
+                            continue
+                        msg = d.get("message") or {}
+                        content = msg.get("content", [])
+                        if isinstance(content, str):
+                            content = [{"type": "text", "text": content}]
+                        if not isinstance(content, list):
+                            continue
+                        for c in content:
+                            if not isinstance(c, dict) or c.get("type") != "text":
+                                continue
+                            text = (c.get("text") or "")
+                            # Sanitize: replace surrogates and control chars
+                            text = text.encode("utf-8", errors="replace").decode("utf-8", errors="replace")
+                            if query_lower in text.lower():
+                                idx = text.lower().find(query_lower)
+                                start = max(0, idx - 40)
+                                end = min(len(text), idx + len(query) + 40)
+                                snippet = ("..." if start > 0 else "") + text[start:end] + ("..." if end < len(text) else "")
+                                matches.append({"role": t, "snippet": snippet})
+                                if len(matches) >= 3:
+                                    break
+                        if len(matches) >= 3:
+                            break
+                if matches:
+                    results.append({
+                        "session_id": meta["session_id"],
+                        "cwd": cwd,
+                        "project_name": meta.get("project_name", ""),
+                        "last_ts": meta.get("last_ts", ""),
+                        "match_count": len(matches),
+                        "matches": matches,
+                    })
+            except Exception:
+                continue
+    results.sort(key=lambda r: r["match_count"], reverse=True)
+    return results[:limit]
+
+
+def _launch_in_terminal(command):
+    """Launch a command in a new terminal window/tab."""
+    import shutil, subprocess
+    if sys.platform == "win32":
+        wt = shutil.which("wt")
+        if wt:
+            subprocess.Popen([wt, "-w", "0", "nt", "--title", "Claude Code",
+                              "cmd", "/k", command])
+        else:
+            os.system(f'start "Claude Code" cmd /k "{command}"')
+    else:
+        subprocess.Popen(["bash", "-c", f"{command} &"], start_new_session=True)
+
+
 # ──────────────────────────────── HTTP handler ────────────────────────────────
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -544,6 +625,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         elif path == "/api/sessions2":
             self.send_json(scan_transcripts())
+
+        elif path.startswith("/api/sessions2/search"):
+            from urllib.parse import urlparse, parse_qs
+            qs = parse_qs(urlparse(self.path).query)
+            query = (qs.get("q") or [""])[0].strip()
+            if not query:
+                self.send_json({"error": "missing q parameter"}, 400)
+                return
+            limit = int((qs.get("limit") or ["20"])[0])
+            self.send_json(search_sessions(query, limit))
 
         elif path == "/api/workspace/status":
             self.send_json(workspace_status())
@@ -695,6 +786,51 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.send_json({"ok": False, "error": "Update timed out"}, 500)
             except Exception as e:
                 self.send_json({"ok": False, "error": str(e)}, 500)
+
+        elif path.startswith("/api/sessions2/launch/"):
+            session_id = path[len("/api/sessions2/launch/"):]
+            if "/" in session_id or "\\" in session_id or not session_id:
+                self.send_json({"ok": False, "error": "bad id"}, 400)
+                return
+            # Find cwd from workspace.json or transcript
+            ws = _load_workspace()
+            cwd = ""
+            if ws:
+                for key, p in ws.get("projects", {}).items():
+                    if session_id in p.get("analyzed_sessions", {}):
+                        cwd = p.get("cwd", "")
+                        break
+            if not cwd:
+                tpath = _find_transcript_path(session_id)
+                if tpath:
+                    try:
+                        with open(tpath, "r", encoding="utf-8", errors="replace") as f:
+                            for line in f:
+                                try:
+                                    d = json.loads(line)
+                                except Exception:
+                                    continue
+                                if d.get("cwd"):
+                                    cwd = d["cwd"]
+                                    break
+                    except Exception:
+                        pass
+            # Determine command: ccr code or claude
+            import shutil
+            ccr_path = shutil.which("ccr")
+            if ccr_path:
+                cmd = f'"{ccr_path}" code --resume {session_id}'
+            else:
+                claude_path = shutil.which("claude") or "claude"
+                cmd = f'"{claude_path}" --resume {session_id}'
+            if cwd:
+                cmd = f'cd /d "{cwd}" && {cmd}'
+            try:
+                _launch_in_terminal(cmd)
+                self.send_json({"ok": True, "cwd": cwd, "cmd": cmd})
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e)}, 500)
+
         else:
             self.send_json({"error": "not found"}, 404)
 
