@@ -70,6 +70,30 @@
   #empty { color: var(--muted); padding: 40px; text-align: center; }
   .copy-toast { position: fixed; bottom: 20px; right: 20px; background: var(--bg3); border: 1px solid var(--green); color: var(--green); padding: 8px 14px; border-radius: 6px; font-size: 13px; opacity: 0; transition: opacity 0.2s; pointer-events: none; z-index: 1000; }
   .copy-toast.show { opacity: 1; }
+
+  /* ── Activity heatmap ── */
+  #heatmap-section { padding: 8px 12px; border-bottom: 1px solid var(--border); }
+  #heatmap-section h3 { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 6px; display: flex; justify-content: space-between; align-items: center; }
+  #heatmap-section h3 span { font-size: 11px; color: var(--muted); text-transform: none; letter-spacing: normal; }
+  #heatmap-grid { display: flex; gap: 2px; }
+  #heatmap-grid .hm-col { display: flex; flex-direction: column; gap: 2px; }
+  .hm-cell { width: 11px; height: 11px; border-radius: 2px; cursor: pointer; position: relative; }
+  .hm-cell:hover { outline: 1px solid var(--text); outline-offset: -1px; }
+  .hm-l0 { background: var(--bg); }
+  .hm-l1 { background: #0e4429; }
+  .hm-l2 { background: #006d32; }
+  .hm-l3 { background: #26a641; }
+  .hm-l4 { background: #39d353; }
+  .hm-month { font-size: 10px; color: var(--muted); margin-bottom: 2px; }
+  #hm-tooltip {
+    display: none; position: fixed; z-index: 100;
+    background: var(--bg3); border: 1px solid var(--border);
+    padding: 4px 8px; border-radius: 4px; font-size: 11px;
+    color: var(--text); pointer-events: none; white-space: nowrap;
+  }
+  .hm-legend { display: flex; align-items: center; gap: 4px; font-size: 10px; color: var(--muted); margin-top: 4px; justify-content: flex-end; }
+  .hm-legend .hm-cell { cursor: default; }
+  .hm-legend .hm-cell:hover { outline: none; }
 </style>
 </head>
 <body>
@@ -82,6 +106,20 @@
 
 <div class="layout">
   <div id="session-pane">
+    <div id="heatmap-section">
+      <h3>Vib Coding 活跃度 <span id="heatmap-total"></span></h3>
+      <div id="heatmap-grid"></div>
+      <div class="hm-legend">
+        <span>少</span>
+        <div class="hm-cell hm-l0"></div>
+        <div class="hm-cell hm-l1"></div>
+        <div class="hm-cell hm-l2"></div>
+        <div class="hm-cell hm-l3"></div>
+        <div class="hm-cell hm-l4"></div>
+        <span>多</span>
+      </div>
+      <div id="hm-tooltip"></div>
+    </div>
     <h2>
       <span>Sessions <span id="session-count" style="color: var(--muted)"></span></span>
       <button class="icon-btn" onclick="refreshSessions()" title="Refresh">⟳</button>
@@ -338,6 +376,107 @@ async function selectSession(id) {
     conv.innerHTML = '<div id="empty">Failed to load conversation.</div>';
   }
 }
+
+// ── Activity Heatmap ──
+async function loadHeatmap() {
+  try {
+    const resp = await fetch('/api/workspace');
+    if (!resp.ok) return;
+    const data = await resp.json();
+    if (!data || !data.projects) return;
+
+    // Aggregate messages by date
+    const dayMap = {};
+    let totalMsgs = 0;
+    for (const p of Object.values(data.projects)) {
+      for (const s of Object.values(p.analyzed_sessions || {})) {
+        const ts = s.ts || '';
+        if (!ts) continue;
+        const date = ts.slice(0, 10); // YYYY-MM-DD
+        const count = s.msg_count || 0;
+        dayMap[date] = (dayMap[date] || 0) + count;
+        totalMsgs += count;
+      }
+    }
+
+    // Build heatmap: 16 weeks back from today
+    const today = new Date();
+    const endDate = new Date(today);
+    endDate.setHours(0, 0, 0, 0);
+    const startDate = new Date(endDate);
+    startDate.setDate(startDate.getDate() - 15 * 7 - endDate.getDay()); // go back to include full 16 weeks
+
+    // Find max for normalization
+    const counts = Object.values(dayMap);
+    const maxCount = counts.length ? Math.max(...counts) : 1;
+
+    // Build columns (weeks)
+    const grid = document.getElementById('heatmap-grid');
+    const tooltip = document.getElementById('hm-tooltip');
+    grid.innerHTML = '';
+
+    const d = new Date(startDate);
+    let prevMonth = -1;
+    while (d <= endDate) {
+      const col = document.createElement('div');
+      col.className = 'hm-col';
+
+      // Month label on first week of each month
+      if (d.getMonth() !== prevMonth && d.getDate() <= 7) {
+        const monthLabel = document.createElement('div');
+        monthLabel.className = 'hm-month';
+        monthLabel.textContent = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][d.getMonth()];
+        monthLabel.style.height = '13px';
+        col.appendChild(monthLabel);
+        prevMonth = d.getMonth();
+      } else {
+        const spacer = document.createElement('div');
+        spacer.style.height = '13px';
+        col.appendChild(spacer);
+      }
+
+      // 7 days per column
+      for (let dow = 0; dow < 7; dow++) {
+        const cellDate = new Date(d);
+        cellDate.setDate(cellDate.getDate() + dow);
+        if (cellDate > endDate) {
+          const empty = document.createElement('div');
+          empty.style.width = '11px';
+          empty.style.height = '11px';
+          col.appendChild(empty);
+          continue;
+        }
+        const dateStr = cellDate.toISOString().slice(0, 10);
+        const count = dayMap[dateStr] || 0;
+        const level = count === 0 ? 0 : count <= maxCount * 0.25 ? 1 : count <= maxCount * 0.5 ? 2 : count <= maxCount * 0.75 ? 3 : 4;
+
+        const cell = document.createElement('div');
+        cell.className = `hm-cell hm-l${level}`;
+        const dayNames = ['日','一','二','三','四','五','六'];
+        const displayDate = `${cellDate.getMonth()+1}月${cellDate.getDate()}日 周${dayNames[cellDate.getDay()]}`;
+        cell.setAttribute('data-tip', `${displayDate}: ${count} 条消息`);
+        cell.addEventListener('mouseenter', (e) => {
+          tooltip.textContent = e.target.getAttribute('data-tip');
+          tooltip.style.display = 'block';
+          const r = e.target.getBoundingClientRect();
+          tooltip.style.left = r.left + 'px';
+          tooltip.style.top = (r.top - 28) + 'px';
+        });
+        cell.addEventListener('mouseleave', () => { tooltip.style.display = 'none'; });
+        col.appendChild(cell);
+      }
+      grid.appendChild(col);
+      d.setDate(d.getDate() + 7);
+    }
+
+    // Total
+    document.getElementById('heatmap-total').textContent = `${totalMsgs.toLocaleString()} 条消息`;
+  } catch (err) {
+    console.error('Heatmap load error:', err);
+  }
+}
+
+loadHeatmap();
 
 async function refreshSessions() {
   try {
