@@ -5,6 +5,7 @@ import http.server
 import json
 import os
 import queue
+import sys
 import threading
 import time
 from datetime import datetime, timezone
@@ -619,6 +620,81 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     if q in _sse_clients:
                         _sse_clients.remove(q)
 
+        else:
+            self.send_json({"error": "not found"}, 404)
+
+    def do_POST(self):
+        path = self.path.split("?")[0]
+
+        if path == "/api/workspace/update":
+            # Run incremental update and return results
+            init_script = Path(__file__).parent / "workspace_init.py"
+            try:
+                import subprocess
+                result = subprocess.run(
+                    [sys.executable, str(init_script), "--incremental"],
+                    capture_output=True, text=True, timeout=600,
+                )
+                events = []
+                for line in result.stdout.strip().split("\n"):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        events.append(json.loads(line))
+                    except Exception:
+                        continue
+
+                done_evt = None
+                project_evts = []
+                for e in events:
+                    if e.get("type") == "project_done":
+                        project_evts.append(e)
+                    elif e.get("type") == "done":
+                        done_evt = e
+
+                total_new = done_evt.get("total_sessions", 0) if done_evt else 0
+
+                # Load workspace to get session details for updated projects
+                ws = _load_workspace()
+                project_details = []
+                for evt in project_evts:
+                    proj_name = evt.get("project", "")
+                    new_count = evt.get("sessions", 0)
+                    proj_record = None
+                    for key, p in ws.get("projects", {}).items():
+                        if p.get("name") == proj_name:
+                            proj_record = p
+                            break
+                    sessions_detail = []
+                    if proj_record:
+                        analyzed = proj_record.get("analyzed_sessions", {})
+                        sorted_sids = sorted(analyzed.keys(),
+                                             key=lambda s: analyzed[s].get("ts", ""), reverse=True)
+                        for sid in sorted_sids[:new_count]:
+                            s = analyzed[sid]
+                            sessions_detail.append({
+                                "goal": s.get("user_goal", ""),
+                                "summary": s.get("summary", ""),
+                                "category": s.get("category", "other"),
+                            })
+                    project_details.append({
+                        "name": proj_name,
+                        "title": proj_record.get("title", "") if proj_record else "",
+                        "new_sessions": new_count,
+                        "sessions": sessions_detail,
+                    })
+
+                self.send_json({
+                    "ok": True,
+                    "total_new": total_new,
+                    "projects_updated": len(project_evts),
+                    "projects": project_details,
+                })
+            except subprocess.TimeoutExpired:
+                self.send_json({"ok": False, "error": "Update timed out"}, 500)
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e)}, 500)
         else:
             self.send_json({"error": "not found"}, 404)
 

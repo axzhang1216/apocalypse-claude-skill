@@ -115,9 +115,138 @@
     z-index: 10;
     display: none;
   }
+
+  /* ── Stale workspace banner ── */
+  #stale-banner {
+    display: none;
+    background: var(--bg2);
+    border-bottom: 1px solid var(--border);
+    padding: 8px 16px;
+    font-size: 13px;
+    color: var(--yellow);
+    flex-shrink: 0;
+    align-items: center;
+    gap: 12px;
+    animation: bannerPulse 3s ease-in-out infinite;
+  }
+  #stale-banner.visible { display: flex; }
+  @keyframes bannerPulse {
+    0%, 100% { border-bottom-color: var(--border); }
+    50% { border-bottom-color: var(--yellow); }
+  }
+  #stale-banner .banner-icon { font-size: 16px; }
+  #stale-banner .banner-text { flex: 1; }
+  #update-btn {
+    background: transparent;
+    border: 1px solid var(--yellow);
+    color: var(--yellow);
+    padding: 4px 12px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 12px;
+    white-space: nowrap;
+    transition: all 0.15s;
+  }
+  #update-btn:hover { background: var(--yellow); color: var(--bg); }
+  #update-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  /* ── Pixel modal ── */
+  #modal-overlay {
+    display: none;
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.75);
+    z-index: 100;
+    justify-content: center;
+    align-items: center;
+  }
+  #modal-overlay.visible { display: flex; }
+  #modal-box {
+    background: var(--bg2);
+    border: 2px solid var(--border);
+    border-radius: 0;
+    max-width: 520px;
+    width: 90%;
+    max-height: 70vh;
+    overflow-y: auto;
+    font-size: 13px;
+    image-rendering: pixelated;
+  }
+  #modal-box .modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg3);
+  }
+  #modal-box .modal-header h3 {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--green);
+  }
+  #modal-box .modal-close {
+    background: transparent;
+    border: none;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 16px;
+    line-height: 1;
+  }
+  #modal-box .modal-close:hover { color: var(--text); }
+  #modal-box .modal-body { padding: 14px; }
+  #modal-box .modal-body .modal-line {
+    padding: 4px 0;
+    line-height: 1.6;
+  }
+  #modal-box .modal-body .modal-proj {
+    font-weight: 600;
+    color: var(--blue);
+    margin-top: 8px;
+    margin-bottom: 2px;
+  }
+  #modal-box .modal-body .modal-sess {
+    color: var(--muted);
+    padding-left: 12px;
+    font-size: 12px;
+  }
+  #modal-box .modal-body .modal-sess .goal { color: var(--text); }
+  #modal-box .modal-body .modal-done {
+    color: var(--green);
+    margin-top: 10px;
+    font-weight: 600;
+  }
+  #modal-box .modal-body .modal-loading {
+    color: var(--muted);
+    text-align: center;
+    padding: 20px 0;
+  }
+  @keyframes blink {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0; }
+  }
+  #modal-box .modal-body .modal-loading::after {
+    content: '█';
+    animation: blink 0.8s step-end infinite;
+    margin-left: 4px;
+  }
 </style>
 </head>
 <body>
+<div id="stale-banner">
+  <span class="banner-icon">⚠</span>
+  <span class="banner-text">Workspace 数据已过期，可能缺少最近的 session。</span>
+  <button id="update-btn" onclick="startWorkspaceUpdate()">更新 Workspace</button>
+</div>
+<div id="modal-overlay" onclick="if(event.target===this)closeModal()">
+  <div id="modal-box">
+    <div class="modal-header">
+      <h3>🌌 Workspace 更新</h3>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body" id="modal-body"></div>
+  </div>
+</div>
 <header>
   <h1>🌌 Workspace</h1>
   <button id="back-btn">← Universe</button>
@@ -1298,6 +1427,9 @@ async function main() {
     // buildUniverseView will handle hiding the loading overlay
     buildUniverseView();
 
+    // Check if workspace is stale (>7 days since last init)
+    checkStaleness(data.last_full_init);
+
     // Show performance stats (delayed to allow batch processing)
     setTimeout(() => {
       const loadTime = performance.now() - startTime;
@@ -1319,6 +1451,85 @@ async function main() {
 }
 
 main();
+
+// ── Workspace staleness check & update ──
+function checkStaleness(lastInit) {
+  const banner = document.getElementById('stale-banner');
+  if (!lastInit) {
+    banner.classList.add('visible');
+    return;
+  }
+  const initDate = new Date(lastInit);
+  const now = new Date();
+  const daysSince = (now - initDate) / (1000 * 60 * 60 * 24);
+  if (daysSince > 7) {
+    const days = Math.floor(daysSince);
+    banner.querySelector('.banner-text').textContent =
+      `Workspace 数据已 ${days} 天未更新，可能缺少最近的 session。`;
+    banner.classList.add('visible');
+  }
+}
+
+async function startWorkspaceUpdate() {
+  const btn = document.getElementById('update-btn');
+  const body = document.getElementById('modal-body');
+  const overlay = document.getElementById('modal-overlay');
+
+  btn.disabled = true;
+  btn.textContent = '更新中...';
+  body.innerHTML = '<div class="modal-loading">分析新 session 中</div>';
+  overlay.classList.add('visible');
+
+  try {
+    const resp = await fetch('/api/workspace/update', { method: 'POST' });
+    const data = await resp.json();
+
+    if (!data.ok) {
+      body.innerHTML = `<div class="modal-line" style="color:var(--red)">更新失败: ${escapeHTML(data.error || 'unknown')}</div>`;
+      return;
+    }
+
+    if (data.total_new === 0) {
+      body.innerHTML = '<div class="modal-line">没有新的 session 需要分析。所有数据已是最新。</div>';
+      document.getElementById('stale-banner').classList.remove('visible');
+      return;
+    }
+
+    let html = `<div class="modal-line">分析完成：<strong style="color:var(--green)">${data.total_new}</strong> 个新 session，${data.projects_updated} 个项目有更新</div>`;
+
+    for (const p of data.projects) {
+      html += `<div class="modal-proj">${escapeHTML(p.title || p.name)}</div>`;
+      for (const s of p.sessions) {
+        const goal = escapeHTML(s.goal || '(无信息)');
+        const cat = escapeHTML(s.category);
+        html += `<div class="modal-sess">• <span class="goal">${goal}</span>  [${cat}]</div>`;
+      }
+    }
+
+    html += '<div class="modal-done">✓ Workspace 已更新</div>';
+    body.innerHTML = html;
+
+    // Hide stale banner
+    document.getElementById('stale-banner').classList.remove('visible');
+
+    // Reload the page data after a short delay
+    setTimeout(() => location.reload(), 2000);
+  } catch (err) {
+    body.innerHTML = `<div class="modal-line" style="color:var(--red)">请求失败: ${escapeHTML(err.message)}</div>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '更新 Workspace';
+  }
+}
+
+function closeModal() {
+  document.getElementById('modal-overlay').classList.remove('visible');
+}
+
+function escapeHTML(s) {
+  if (!s) return '';
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
 </script>
 </body>
 </html>
