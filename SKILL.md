@@ -179,6 +179,28 @@ When running incremental analysis (step 3, `initialized: true`), after the incre
 6. **User confirms** → write metadata via `--set-themes`, then report:
    > "已更新 {N} 个项目。"
 
+## Standalone Workspace Update
+
+Users can update the workspace independently of the `/apocalypse` skill invocation:
+
+```bash
+apocalypse --update
+```
+
+This runs the full update flow in one command:
+
+1. **Scan**: runs `workspace_init.py --incremental` to analyze all new sessions since last update
+2. **Report**: shows how many new sessions were found and which projects were affected
+3. **Theme check**: identifies any new projects that lack title/tags (auto-assigns from session categories)
+4. **Confirm**: presents proposed titles/tags and asks user to confirm before writing
+5. **Write**: applies metadata via `--set-themes` and reports completion
+
+For quick silent refresh (no UI):
+
+```bash
+apocalypse --refresh    # runs incremental analysis only, no summary
+```
+
 ## Notes
 
 Hooks are registered on first run via `~/.claude/settings.local.json`. Running this skill again is safe — it will not duplicate hooks or restart an already-running server.

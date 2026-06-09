@@ -604,9 +604,162 @@ def session_select_flow(project):
         if action is None: return None
 
 
+# ── Workspace update ──────────────────────────────────────────────────────────
+CATEGORY_LABELS = {
+    "frontend": "前端开发", "backend": "后端开发", "devops": "部署运维",
+    "debugging": "调试修复", "refactoring": "重构优化", "data": "数据处理",
+    "docs": "文档写作", "config": "配置环境", "exploration": "探索研究",
+    "ai_tools": "AI工具开发", "other": "其他",
+}
+
+
+def _run_incremental_and_collect():
+    """Run workspace_init.py --incremental and parse its JSONL output."""
+    init_script = str(WORKSPACE.parent.parent / "skills" / "apocalypse" / "workspace_init.py")
+    result = subprocess.run(
+        [sys.executable, init_script, "--incremental"],
+        capture_output=True, text=True, timeout=600,
+    )
+    events = []
+    for line in result.stdout.strip().split("\n"):
+        line = line.strip()
+        if not line: continue
+        try: events.append(json.loads(line))
+        except Exception: continue
+    return events
+
+
+def _dump_summaries():
+    """Run --dump-summaries and return parsed JSON."""
+    init_script = str(WORKSPACE.parent.parent / "skills" / "apocalypse" / "workspace_init.py")
+    result = subprocess.run(
+        [sys.executable, init_script, "--dump-summaries"],
+        capture_output=True, text=True, timeout=60,
+    )
+    try: return json.loads(result.stdout)
+    except Exception: return {}
+
+
+def _set_themes(themes_map):
+    """Write title/tags via --set-themes. themes_map: {proj_key: {title, tags}}."""
+    init_script = str(WORKSPACE.parent.parent / "skills" / "apocalypse" / "workspace_init.py")
+    payload = json.dumps({"projects": themes_map}, ensure_ascii=False)
+    subprocess.run(
+        [sys.executable, init_script, "--set-themes"],
+        input=payload, capture_output=True, text=True, timeout=30,
+    )
+
+
+def _auto_theme_from_categories(analyzed_sessions):
+    """Derive a provisional title and tags from session categories."""
+    cat_counts = {}
+    sample_goals = []
+    for sid, s in analyzed_sessions.items():
+        cat = s.get("category", "other")
+        cat_counts[cat] = cat_counts.get(cat, 0) + 1
+        if len(sample_goals) < 3 and s.get("user_goal"):
+            sample_goals.append(s["user_goal"])
+    if not cat_counts:
+        return {"title": "", "tags": []}
+    top_cats = sorted(cat_counts.items(), key=lambda x: x[1], reverse=True)
+    main_cat = top_cats[0][0]
+    title = CATEGORY_LABELS.get(main_cat, main_cat)
+    tags = [CATEGORY_LABELS.get(c, c) for c, _ in top_cats[:3]]
+    # Try to build a more specific title from goals
+    if sample_goals:
+        # Use first goal as title hint (truncated)
+        hint = _trunc(sample_goals[0], 30)
+        if hint:
+            title = hint
+    return {"title": title, "tags": tags}
+
+
+def update_workspace():
+    """Run incremental update and present results. Assign themes to new projects."""
+    print(f"\n  {BOLD}{CYAN}Apocalypse Workspace 更新{RESET}\n")
+
+    # Step 1: Run incremental analysis
+    print(f"  {DIM}扫描新 session 并分析中...{RESET}")
+    events = _run_incremental_and_collect()
+
+    done_evt = None
+    project_evts = []
+    for e in events:
+        if e.get("type") == "project_done":
+            project_evts.append(e)
+        elif e.get("type") == "done":
+            done_evt = e
+        elif e.get("type") == "error":
+            print(f"  {RED}错误: {e.get('message', '')}{RESET}")
+            return
+
+    total_new = done_evt.get("total_sessions", 0) if done_evt else 0
+    if total_new == 0:
+        print(f"  {DIM}没有新的 session 需要分析。{RESET}")
+        return
+
+    print(f"  {GREEN}分析完成：{total_new} 个新 session，{len(project_evts)} 个项目有更新\n{RESET}")
+
+    # Step 2: Check for projects needing themes
+    summaries = _dump_summaries()
+    projects_list = summaries.get("projects", [])
+    needs_theme = []
+    for p in projects_list:
+        if not p.get("title"):
+            needs_theme.append(p)
+
+    if not needs_theme:
+        print(f"  {DIM}所有项目已有标题和标签，无需更新。{RESET}")
+        return
+
+    # Step 3: Show new projects and auto-assign themes
+    print(f"  {BOLD}以下 {len(needs_theme)} 个项目需要设定标题和标签：{RESET}\n")
+    themes_to_set = {}
+    for p in needs_theme:
+        key = p["key"]
+        analyzed = {}
+        ws = _load_workspace()
+        if ws and key in ws.get("projects", {}):
+            analyzed = ws["projects"][key].get("analyzed_sessions", {})
+        auto = _auto_theme_from_categories(analyzed)
+        goals = p.get("sample_goals", [])[:2]
+        cat_bd = p.get("category_breakdown", {})
+        top_cat = max(cat_bd.items(), key=lambda x: x[1])[0] if cat_bd else "other"
+
+        print(f"  {BOLD}{p['folder_name']}{RESET}")
+        print(f"    {DIM}Sessions:{RESET} {p['session_count']}  |  {DIM}主分类:{RESET} {CATEGORY_LABELS.get(top_cat, top_cat)}")
+        if goals:
+            for g in goals:
+                print(f"    {DIM}•{RESET} {_trunc(g, 60)}")
+        print(f"    {GREEN}建议标题:{RESET} {auto['title']}")
+        print(f"    {GREEN}建议标签:{RESET} {', '.join(auto['tags'])}")
+        print()
+        themes_to_set[key] = auto
+
+    # Step 4: Confirm and write
+    print(f"  {DIM}{'─' * 50}{RESET}")
+    try:
+        choice = input(f"  {BOLD}确认以上标题和标签？(Y/n/edit): {RESET}").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        choice = "n"
+
+    if choice == "n":
+        print(f"  {DIM}已跳过主题设定。{RESET}")
+        return
+    elif choice == "edit":
+        print(f"  {DIM}请手动编辑 workspace.json 中的 title 和 tags 字段。{RESET}")
+        return
+
+    _set_themes(themes_to_set)
+    print(f"\n  {GREEN}已更新 {len(themes_to_set)} 个项目的标题和标签。{RESET}")
+    print(f"  {DIM}打开 http://localhost:7749/workspace.html 查看更新后的星图。{RESET}\n")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Apocalypse Launcher")
     parser.add_argument("--refresh", action="store_true")
+    parser.add_argument("--update", action="store_true",
+                        help="Update workspace: analyze new sessions, assign themes, show summary")
     parser.add_argument("--list", action="store_true")
     args = parser.parse_args()
 
@@ -617,6 +770,9 @@ def main():
                 "sessions": [{"id": s["id"], "goal": s["goal"], "ts": s["ts"]} for s in p["sessions"]]}
                for p in projects]
         print(json.dumps(out, ensure_ascii=False, indent=2)); return
+
+    if args.update:
+        update_workspace(); return
 
     if args.refresh:
         print(f"  {DIM}增量更新中...{RESET}"); run_incremental()
