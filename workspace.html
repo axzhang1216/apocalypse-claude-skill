@@ -1427,8 +1427,8 @@ async function main() {
     // buildUniverseView will handle hiding the loading overlay
     buildUniverseView();
 
-    // Check if workspace is stale (>7 days since last init)
-    checkStaleness(data.last_full_init);
+    // Check if workspace is stale (>7 days since last analysis)
+    checkStaleness(data.last_analysis || data.last_full_init);
 
     // Show performance stats (delayed to allow batch processing)
     setTimeout(() => {

@@ -431,6 +431,7 @@ def run(incremental: bool = False):
     if not incremental:
         ws["last_full_init"] = now_str
 
+    ws["last_analysis"] = now_str
     save_workspace(ws)
 
     print(json.dumps({

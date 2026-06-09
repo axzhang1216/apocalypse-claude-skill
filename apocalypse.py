@@ -552,9 +552,9 @@ def recent_sessions_menu():
         if not sel: return
 
         if sel.get("_fallback"):
-            project = project_select_flow()
-            if project is None: return
-            continue
+            session = project_select_flow()
+            if session is None: return
+            launch_session(session); return
 
         session = sel["session"]
         action = show_detail(session)
