@@ -116,20 +116,23 @@
     display: none;
   }
 
-  /* ── Stale workspace banner ── */
+  /* ── Workspace status banner ── */
   #stale-banner {
     display: none;
     background: var(--bg2);
     border-bottom: 1px solid var(--border);
     padding: 8px 16px;
     font-size: 13px;
-    color: var(--yellow);
+    color: var(--muted);
     flex-shrink: 0;
     align-items: center;
     gap: 12px;
-    animation: bannerPulse 3s ease-in-out infinite;
   }
   #stale-banner.visible { display: flex; }
+  #stale-banner.stale {
+    color: var(--yellow);
+    animation: bannerPulse 3s ease-in-out infinite;
+  }
   @keyframes bannerPulse {
     0%, 100% { border-bottom-color: var(--border); }
     50% { border-bottom-color: var(--yellow); }
@@ -1453,21 +1456,40 @@ async function main() {
 main();
 
 // ── Workspace staleness check & update ──
-function checkStaleness(lastInit) {
+function relativeTime(ts) {
+  if (!ts) return '未知';
+  const diff = (Date.now() - new Date(ts).getTime()) / 1000;
+  if (diff < 60) return '刚刚';
+  if (diff < 3600) return `${Math.floor(diff/60)} 分钟前`;
+  if (diff < 86400) return `${Math.floor(diff/3600)} 小时前`;
+  const days = Math.floor(diff/86400);
+  if (days < 30) return `${days} 天前`;
+  return `${Math.floor(days/30)} 月前`;
+}
+
+function checkStaleness(lastAnalysis) {
   const banner = document.getElementById('stale-banner');
-  if (!lastInit) {
+  const textEl = banner.querySelector('.banner-text');
+  const btnEl = document.getElementById('update-btn');
+
+  if (!lastAnalysis) {
+    textEl.textContent = 'Workspace 尚未初始化。';
+    btnEl.textContent = '初始化 Workspace';
     banner.classList.add('visible');
     return;
   }
-  const initDate = new Date(lastInit);
-  const now = new Date();
-  const daysSince = (now - initDate) / (1000 * 60 * 60 * 24);
+
+  const rel = relativeTime(lastAnalysis);
+  const daysSince = (Date.now() - new Date(lastAnalysis).getTime()) / (1000 * 60 * 60 * 24);
+
   if (daysSince > 7) {
-    const days = Math.floor(daysSince);
-    banner.querySelector('.banner-text').textContent =
-      `Workspace 数据已 ${days} 天未更新，可能缺少最近的 session。`;
-    banner.classList.add('visible');
+    textEl.textContent = `数据更新于 ${rel}，已超过 7 天，可能缺少最近的 session。`;
+    banner.classList.add('stale');
+  } else {
+    textEl.textContent = `数据更新于 ${rel}`;
+    banner.classList.remove('stale');
   }
+  banner.classList.add('visible');
 }
 
 async function startWorkspaceUpdate() {
