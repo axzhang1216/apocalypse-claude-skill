@@ -233,6 +233,40 @@
     animation: blink 0.8s step-end infinite;
     margin-left: 4px;
   }
+
+  /* ── Force graph overlay ── */
+  #graph-overlay {
+    display: none; position: absolute; inset: 0; z-index: 30;
+    background: var(--bg);
+  }
+  #graph-overlay.visible { display: block; }
+  #graph-canvas { display: block; width: 100%; height: 100%; }
+  #graph-toolbar {
+    position: absolute; top: 10px; left: 10px; z-index: 35;
+    display: flex; gap: 8px; align-items: center;
+  }
+  #graph-toolbar button {
+    background: var(--bg2); border: 1px solid var(--border); color: var(--text);
+    padding: 4px 10px; border-radius: 4px; cursor: pointer; font-family: inherit; font-size: 12px;
+  }
+  #graph-toolbar button:hover { background: var(--bg3); }
+  #graph-legend {
+    position: absolute; bottom: 10px; left: 10px; z-index: 35;
+    background: var(--bg2); border: 1px solid var(--border); border-radius: 6px;
+    padding: 8px 12px; font-size: 11px;
+  }
+  #graph-legend div { display: flex; align-items: center; gap: 6px; margin-bottom: 3px; }
+  #graph-legend div:last-child { margin-bottom: 0; }
+  #graph-legend .gl-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+  #graph-node-tooltip {
+    display: none; position: absolute; z-index: 40;
+    background: var(--bg2); border: 1px solid var(--border); border-radius: 6px;
+    padding: 10px 14px; font-size: 12px; max-width: 300px; line-height: 1.5;
+    pointer-events: none;
+  }
+  #graph-node-tooltip .gnt-type { font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 4px; }
+  #graph-node-tooltip .gnt-label { font-weight: 600; font-size: 13px; margin-bottom: 4px; }
+  #graph-node-tooltip .gnt-summary { color: var(--muted); }
 </style>
 </head>
 <body>
@@ -281,6 +315,22 @@
     Generating nebulae...
   </div>
   <div id="perf-stats"></div>
+  <div id="graph-overlay">
+    <canvas id="graph-canvas"></canvas>
+    <div id="graph-toolbar">
+      <button onclick="closeGraph()">← 返回星图</button>
+      <span id="graph-title" style="color:var(--blue);font-weight:600;font-size:13px"></span>
+    </div>
+    <div id="graph-legend">
+      <div><div class="gl-dot" style="background:#3fb950"></div> 决策</div>
+      <div><div class="gl-dot" style="background:#58a6ff"></div> 讨论</div>
+    </div>
+    <div id="graph-node-tooltip">
+      <div class="gnt-type"></div>
+      <div class="gnt-label"></div>
+      <div class="gnt-summary"></div>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -1253,9 +1303,17 @@ function onClick(e) {
   const ud = hoveredMesh.userData;
 
   if (ud.type === 'project' && currentView === 'universe') {
-    // Animate camera closer then switch view
-    const target = hoveredMesh.position.clone();
-    animateCameraTo(target, () => buildSolarView(ud.proj));
+    // Try graph view first (if project has discussion-decision points)
+    if (ud.proj.points && ud.proj.points.length > 0) {
+      const target = hoveredMesh.position.clone();
+      animateCameraTo(target, () => {
+        buildSolarView(ud.proj);
+        openGraph(ud.proj);
+      });
+    } else {
+      const target = hoveredMesh.position.clone();
+      animateCameraTo(target, () => buildSolarView(ud.proj));
+    }
   } else if (ud.type === 'session' && currentView === 'solar') {
     openPanel(ud.session, ud.sid);
   }
@@ -1284,6 +1342,7 @@ function animateCameraTo(target, callback) {
 }
 
 backBtn.addEventListener('click', () => {
+  closeGraph();
   buildUniverseView();
   camera.position.set(0, 30, 120);
   controls.target.set(0, 0, 0);
@@ -1465,6 +1524,175 @@ function relativeTime(ts) {
   const days = Math.floor(diff/86400);
   if (days < 30) return `${days} 天前`;
   return `${Math.floor(days/30)} 月前`;
+}
+
+// ── Force-directed graph for discussion-decision pairs ──
+let graphNodes = [], graphEdges = [], graphAnim = null, graphDragging = null;
+let graphMouse = { x: 0, y: 0 }, graphHover = null;
+
+function openGraph(proj) {
+  const points = proj.points || [];
+  if (!points.length) return false;
+
+  const overlay = document.getElementById('graph-overlay');
+  const canvas = document.getElementById('graph-canvas');
+  const ctx = canvas.getContext('2d');
+  overlay.classList.add('visible');
+  document.getElementById('graph-title').textContent = proj.title || proj.name;
+
+  // Size canvas
+  const rect = overlay.getBoundingClientRect();
+  canvas.width = rect.width * devicePixelRatio;
+  canvas.height = rect.height * devicePixelRatio;
+  ctx.scale(devicePixelRatio, devicePixelRatio);
+  const W = rect.width, H = rect.height;
+
+  // Build nodes and edges
+  const idMap = {};
+  graphNodes = points.map((p, i) => {
+    const node = {
+      id: p.id, label: p.label, summary: p.summary, type: p.type,
+      x: W/2 + (Math.random()-0.5) * W * 0.6,
+      y: H/2 + (Math.random()-0.5) * H * 0.6,
+      vx: 0, vy: 0, radius: p.type === 'decision' ? 14 : 10,
+      color: p.type === 'decision' ? '#3fb950' : '#58a6ff',
+    };
+    idMap[p.id] = node;
+    return node;
+  });
+
+  graphEdges = [];
+  for (const p of points) {
+    for (const rid of (p.related_to || [])) {
+      if (idMap[rid] && idMap[p.id]) {
+        graphEdges.push({ source: idMap[p.id], target: idMap[rid] });
+      }
+    }
+  }
+
+  // Mouse events
+  canvas.onmousemove = (e) => {
+    const r = canvas.getBoundingClientRect();
+    graphMouse.x = e.clientX - r.left;
+    graphMouse.y = e.clientY - r.top;
+    if (graphDragging) {
+      graphDragging.x = graphMouse.x;
+      graphDragging.y = graphMouse.y;
+      graphDragging.vx = 0; graphDragging.vy = 0;
+    }
+    // Hit test
+    graphHover = null;
+    for (const n of graphNodes) {
+      const dx = n.x - graphMouse.x, dy = n.y - graphMouse.y;
+      if (dx*dx + dy*dy < (n.radius+4)*(n.radius+4)) { graphHover = n; break; }
+    }
+    canvas.style.cursor = graphHover ? 'pointer' : 'default';
+    // Tooltip
+    const tip = document.getElementById('graph-node-tooltip');
+    if (graphHover) {
+      tip.style.display = 'block';
+      tip.style.left = (graphMouse.x + 16) + 'px';
+      tip.style.top = (graphMouse.y - 10) + 'px';
+      tip.querySelector('.gnt-type').textContent = graphHover.type === 'decision' ? '🟢 决策' : '🔵 讨论';
+      tip.querySelector('.gnt-type').style.color = graphHover.color;
+      tip.querySelector('.gnt-label').textContent = graphHover.label;
+      tip.querySelector('.gnt-summary').textContent = graphHover.summary;
+    } else {
+      tip.style.display = 'none';
+    }
+  };
+  canvas.onmousedown = (e) => {
+    if (graphHover) { graphDragging = graphHover; }
+  };
+  canvas.onmouseup = () => { graphDragging = null; };
+  canvas.onmouseleave = () => { graphDragging = null; graphHover = null; document.getElementById('graph-node-tooltip').style.display = 'none'; };
+
+  // Start simulation
+  if (graphAnim) cancelAnimationFrame(graphAnim);
+  function tick() {
+    // Forces
+    const k = 0.0005; // spring constant
+    const repulse = 8000;
+    const center = { x: W/2, y: H/2 };
+    const damping = 0.85;
+
+    for (let i = 0; i < graphNodes.length; i++) {
+      const a = graphNodes[i];
+      if (a === graphDragging) continue;
+      // Center pull
+      a.vx += (center.x - a.x) * 0.001;
+      a.vy += (center.y - a.y) * 0.001;
+      // Repulsion from other nodes
+      for (let j = 0; j < graphNodes.length; j++) {
+        if (i === j) continue;
+        const b = graphNodes[j];
+        let dx = a.x - b.x, dy = a.y - b.y;
+        let dist = Math.sqrt(dx*dx + dy*dy) || 1;
+        let force = repulse / (dist * dist);
+        a.vx += (dx/dist) * force;
+        a.vy += (dy/dist) * force;
+      }
+    }
+    // Edge springs
+    for (const e of graphEdges) {
+      let dx = e.target.x - e.source.x;
+      let dy = e.target.y - e.source.y;
+      let dist = Math.sqrt(dx*dx + dy*dy) || 1;
+      let force = (dist - 120) * k;
+      if (e.source !== graphDragging) { e.source.vx += (dx/dist)*force; e.source.vy += (dy/dist)*force; }
+      if (e.target !== graphDragging) { e.target.vx -= (dx/dist)*force; e.target.vy -= (dy/dist)*force; }
+    }
+    // Apply velocity
+    for (const n of graphNodes) {
+      if (n === graphDragging) continue;
+      n.vx *= damping; n.vy *= damping;
+      n.x += n.vx; n.y += n.vy;
+      n.x = Math.max(30, Math.min(W-30, n.x));
+      n.y = Math.max(30, Math.min(H-30, n.y));
+    }
+
+    // Draw
+    ctx.clearRect(0, 0, W, H);
+    // Edges
+    ctx.strokeStyle = 'rgba(48,54,61,0.6)';
+    ctx.lineWidth = 1;
+    for (const e of graphEdges) {
+      ctx.beginPath();
+      ctx.moveTo(e.source.x, e.source.y);
+      ctx.lineTo(e.target.x, e.target.y);
+      ctx.stroke();
+    }
+    // Nodes
+    for (const n of graphNodes) {
+      const isHover = n === graphHover;
+      const r = n.radius * (isHover ? 1.3 : 1);
+      // Glow
+      if (isHover) {
+        ctx.shadowColor = n.color;
+        ctx.shadowBlur = 12;
+      }
+      ctx.fillStyle = n.color;
+      ctx.beginPath();
+      ctx.arc(n.x, n.y, r, 0, Math.PI*2);
+      ctx.fill();
+      ctx.shadowBlur = 0;
+      // Label
+      ctx.fillStyle = isHover ? '#fff' : '#8b949e';
+      ctx.font = `${isHover ? '12' : '10'}px 'SF Mono', Consolas, monospace`;
+      ctx.textAlign = 'center';
+      const lbl = n.label.length > 18 ? n.label.slice(0,17)+'…' : n.label;
+      ctx.fillText(lbl, n.x, n.y + r + 14);
+    }
+
+    graphAnim = requestAnimationFrame(tick);
+  }
+  tick();
+  return true;
+}
+
+function closeGraph() {
+  document.getElementById('graph-overlay').classList.remove('visible');
+  if (graphAnim) { cancelAnimationFrame(graphAnim); graphAnim = null; }
 }
 
 function checkStaleness(lastAnalysis) {

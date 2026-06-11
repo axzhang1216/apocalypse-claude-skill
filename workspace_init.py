@@ -509,6 +509,190 @@ def set_themes():
     print(json.dumps({"type": "projects_updated", "count": count}, ensure_ascii=False), flush=True)
 
 
+def extract_points():
+    """Extract discussion-decision pairs from sessions using Haiku."""
+    try:
+        import anthropic
+    except ImportError:
+        print(json.dumps({"type": "error", "message": "anthropic SDK not installed"}), flush=True)
+        sys.exit(1)
+
+    client = anthropic.Anthropic()
+    ws = load_workspace()
+    total_extracted = 0
+
+    for proj_key, proj in ws.get("projects", {}).items():
+        analyzed = proj.get("analyzed_sessions", {})
+        all_points = proj.get("points", [])
+
+        for sid, s in analyzed.items():
+            # Skip already-extracted sessions
+            if any(p.get("session_id") == sid for p in all_points):
+                continue
+
+            msg_count = s.get("msg_count", 0)
+            if msg_count < 4:
+                continue
+
+            # Read transcript
+            path = None
+            for jf in PROJECTS_DIR.glob(f"*/{sid}.jsonl"):
+                path = jf
+                break
+            if not path:
+                continue
+
+            # Build conversation context
+            trace_parts = []
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as f:
+                    user_count = 0
+                    for raw in f:
+                        raw = raw.strip()
+                        if not raw:
+                            continue
+                        try:
+                            d = json.loads(raw)
+                        except Exception:
+                            continue
+                        t = d.get("type", "")
+                        if t == "user":
+                            if _is_noise_user_record(d):
+                                continue
+                            msg = d.get("message") or {}
+                            content = msg.get("content", [])
+                            texts = _extract_texts(content)
+                            if texts:
+                                user_count += 1
+                                trace_parts.append(f"[User {user_count}] {' '.join(texts)[:600]}")
+                        elif t == "assistant":
+                            msg = d.get("message") or {}
+                            content = msg.get("content", [])
+                            if isinstance(content, str):
+                                content = [{"type": "text", "text": content}]
+                            if not isinstance(content, list):
+                                continue
+                            texts = [c.get("text", "") for c in content
+                                     if isinstance(c, dict) and c.get("type") == "text" and (c.get("text") or "").strip()]
+                            if texts:
+                                trace_parts.append(f"[Assistant] {texts[-1][:600]}")
+            except Exception:
+                continue
+
+            if not trace_parts:
+                continue
+
+            conversation = "\n".join(trace_parts[:8])
+
+            prompt = f"""Analyze this Claude Code session and extract discussion-decision pairs.
+
+Session goal: {s.get('user_goal', 'unknown')}
+Category: {s.get('category', 'other')}
+
+Conversation:
+{conversation}
+
+Extract ALL meaningful discussion-decision pairs. Each pair represents one topic where the user discussed something and a decision or conclusion was reached.
+
+Reply in JSON only (no markdown fences):
+{{
+  "points": [
+    {{
+      "type": "decision",
+      "label": "short label (max 30 chars)",
+      "summary": "one sentence explaining what was decided",
+      "related_labels": ["label of another related point"]
+    }},
+    {{
+      "type": "discussion",
+      "label": "short label (max 30 chars)",
+      "summary": "one sentence summarizing the discussion",
+      "related_labels": []
+    }}
+  ]
+}}
+
+Rules:
+- type must be exactly "decision" or "discussion"
+- A "decision" is a concrete choice made (tool selection, approach, architecture)
+- A "discussion" is an exploration or conversation without a single clear decision
+- Extract 2-6 points per session
+- related_labels connects points that are causally or topically related
+- Keep labels concise and specific"""
+
+            try:
+                response = client.messages.create(
+                    model=HAIKU_MODEL,
+                    max_tokens=1024,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                text = ""
+                for block in response.content:
+                    if hasattr(block, "text"):
+                        text = block.text.strip()
+                        break
+                if text.startswith("```"):
+                    lines = text.split("\n")
+                    text = "\n".join(lines[1:-1]) if len(lines) > 2 else text
+                result = json.loads(text)
+            except Exception:
+                continue
+
+            # Build points with IDs and resolve relations
+            points_data = result.get("points", [])
+            label_to_id = {}
+            for p in points_data:
+                pid = f"{sid[:8]}_{total_extracted}"
+                total_extracted += 1
+                label_to_id[p.get("label", "")] = pid
+                all_points.append({
+                    "id": pid,
+                    "session_id": sid,
+                    "type": p.get("type", "discussion"),
+                    "label": p.get("label", ""),
+                    "summary": p.get("summary", ""),
+                    "ts": s.get("ts", ""),
+                    "related_to": [],
+                })
+
+            # Resolve related_labels to IDs
+            for pt in all_points:
+                if pt["session_id"] == sid and pt["id"] in [p["id"] for p in all_points[-len(points_data):]]:
+                    # This point was just added
+                    pass
+
+            # Second pass: resolve cross-references within this batch
+            for p in points_data:
+                pid = label_to_id.get(p.get("label", ""))
+                if not pid:
+                    continue
+                related_ids = []
+                for rl in p.get("related_labels", []):
+                    if rl in label_to_id:
+                        related_ids.append(label_to_id[rl])
+                # Find the point and set related_to
+                for pt in all_points:
+                    if pt["id"] == pid:
+                        pt["related_to"] = related_ids
+                        break
+
+        proj["points"] = all_points
+        save_workspace(ws)
+
+        if all_points:
+            print(json.dumps({
+                "type": "points_extracted",
+                "project": proj.get("name", ""),
+                "total_points": len(all_points),
+            }, ensure_ascii=False), flush=True)
+
+    # Cross-session relation pass: find related points across sessions
+    print(json.dumps({
+        "type": "done",
+        "total_points": total_extracted,
+    }, ensure_ascii=False), flush=True)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Initialize Apocalypse workspace data")
     parser.add_argument("--incremental", action="store_true",
@@ -517,10 +701,14 @@ if __name__ == "__main__":
                         help="Output compact project summaries for harness analysis")
     parser.add_argument("--set-themes", action="store_true",
                         help="Read theme mapping from stdin and update workspace.json")
+    parser.add_argument("--extract-points", action="store_true",
+                        help="Extract discussion-decision pairs from sessions")
     args = parser.parse_args()
     if args.dump_summaries:
         dump_summaries()
     elif args.set_themes:
         set_themes()
+    elif args.extract_points:
+        extract_points()
     else:
         run(incremental=args.incremental)
