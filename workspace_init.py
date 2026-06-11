@@ -592,33 +592,26 @@ Category: {s.get('category', 'other')}
 Conversation:
 {conversation}
 
-Extract ALL meaningful discussion-decision pairs. Each pair represents one topic where the user discussed something and a decision or conclusion was reached.
+Each "point" is ONE complete discussion-decision process: what was discussed AND what was decided/done.
 
 Reply in JSON only (no markdown fences):
 {{
   "points": [
     {{
-      "type": "decision",
-      "label": "short label (max 30 chars)",
-      "summary": "one sentence explaining what was decided",
-      "related_labels": ["label of another related point"]
-    }},
-    {{
-      "type": "discussion",
-      "label": "short label (max 30 chars)",
-      "summary": "one sentence summarizing the discussion",
-      "related_labels": []
+      "topic": "what was discussed (short, max 25 chars)",
+      "decision": "what was decided or done (one sentence)",
+      "related_topics": ["topic of another related point"]
     }}
   ]
 }}
 
 Rules:
-- type must be exactly "decision" or "discussion"
-- A "decision" is a concrete choice made (tool selection, approach, architecture)
-- A "discussion" is an exploration or conversation without a single clear decision
+- Each point MUST have both a topic (the question/problem) and a decision (the answer/solution)
 - Extract 2-6 points per session
-- related_labels connects points that are causally or topically related
-- Keep labels concise and specific"""
+- related_topics connects points that are causally or topically related
+- Keep topic short and specific (this is the node label)
+- decision should be concrete: what tool, what approach, what was changed
+- If a discussion had no clear decision, the decision field summarizes the conclusion or current state"""
 
             try:
                 response = client.messages.create(
@@ -640,37 +633,30 @@ Rules:
 
             # Build points with IDs and resolve relations
             points_data = result.get("points", [])
-            label_to_id = {}
+            topic_to_id = {}
             for p in points_data:
                 pid = f"{sid[:8]}_{total_extracted}"
                 total_extracted += 1
-                label_to_id[p.get("label", "")] = pid
+                topic = p.get("topic", "")
+                topic_to_id[topic] = pid
                 all_points.append({
                     "id": pid,
                     "session_id": sid,
-                    "type": p.get("type", "discussion"),
-                    "label": p.get("label", ""),
-                    "summary": p.get("summary", ""),
+                    "topic": topic,
+                    "decision": p.get("decision", ""),
                     "ts": s.get("ts", ""),
                     "related_to": [],
                 })
 
-            # Resolve related_labels to IDs
-            for pt in all_points:
-                if pt["session_id"] == sid and pt["id"] in [p["id"] for p in all_points[-len(points_data):]]:
-                    # This point was just added
-                    pass
-
             # Second pass: resolve cross-references within this batch
             for p in points_data:
-                pid = label_to_id.get(p.get("label", ""))
+                pid = topic_to_id.get(p.get("topic", ""))
                 if not pid:
                     continue
                 related_ids = []
-                for rl in p.get("related_labels", []):
-                    if rl in label_to_id:
-                        related_ids.append(label_to_id[rl])
-                # Find the point and set related_to
+                for rt in p.get("related_topics", []):
+                    if rt in topic_to_id:
+                        related_ids.append(topic_to_id[rt])
                 for pt in all_points:
                     if pt["id"] == pid:
                         pt["related_to"] = related_ids
