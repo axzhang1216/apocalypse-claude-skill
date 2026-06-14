@@ -195,6 +195,23 @@ This runs the full update flow in one command:
 4. **Confirm**: presents proposed titles/tags and asks user to confirm before writing
 5. **Write**: applies metadata via `--set-themes` and reports completion
 
+### Extracting discussion-decision points
+
+After session analysis, extract discussion-decision pairs for the 3D graph view:
+
+```bash
+python ~/.claude/skills/apocalypse/workspace_init.py --extract-points
+```
+
+This reads each session transcript and uses Haiku to extract:
+- **topic**: what was discussed (the question/problem)
+- **decision**: what was decided or done (the answer/solution)
+- **related_to**: connections to other discussion-decision points
+- **session_id**: link to the original session
+
+Points are stored in `workspace.json` under each project's `points` array.
+Each point represents one complete discussion-decision process, visualized as a star node in the workspace graph.
+
 For quick silent refresh (no UI):
 
 ```bash

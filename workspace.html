@@ -267,6 +267,18 @@
   #graph-node-tooltip .gnt-type { font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 4px; color: var(--blue); }
   #graph-node-tooltip .gnt-label { font-weight: 600; font-size: 13px; margin-bottom: 6px; }
   #graph-node-tooltip .gnt-summary { color: var(--muted); line-height: 1.6; }
+  /* Graph side panel */
+  #graph-side-panel {
+    display: none; position: absolute; top: 0; right: 0; width: 320px; height: 100%;
+    background: var(--bg2); border-left: 1px solid var(--border);
+    padding: 16px; overflow-y: auto; z-index: 35;
+  }
+  #graph-side-panel.open { display: block; }
+  #graph-panel-close {
+    float: right; background: transparent; border: none; color: var(--muted);
+    cursor: pointer; font-size: 16px; line-height: 1;
+  }
+  #graph-panel-close:hover { color: var(--text); }
 </style>
 </head>
 <body>
@@ -323,12 +335,21 @@
     </div>
     <div id="graph-legend">
       <div><div class="gl-dot" style="background:#58a6ff"></div> 讨论-决策</div>
-      <div style="color:var(--muted);margin-top:4px;font-size:10px">虚线 = 关联</div>
+      <div style="color:var(--muted);margin-top:4px;font-size:10px">虚线 = 关联  |  点击查看详情</div>
     </div>
-    <div id="graph-node-tooltip">
-      <div class="gnt-type"></div>
-      <div class="gnt-label"></div>
-      <div class="gnt-summary"></div>
+    <div id="graph-side-panel">
+      <button id="graph-panel-close" onclick="closeGraphPanel()">✕</button>
+      <div id="gp-type" style="font-size:11px;color:var(--blue);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:6px">讨论-决策</div>
+      <div id="gp-topic" style="font-weight:600;font-size:15px;margin-bottom:10px;line-height:1.4"></div>
+      <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:4px">讨论</div>
+      <div id="gp-discussion" style="font-size:13px;color:var(--text);margin-bottom:12px;line-height:1.5"></div>
+      <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:4px">决策</div>
+      <div id="gp-decision" style="font-size:13px;color:var(--green);margin-bottom:12px;line-height:1.5;font-weight:600"></div>
+      <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:4px">关联 Session</div>
+      <div id="gp-session" style="font-size:12px;margin-bottom:14px">
+        <a id="gp-session-link" href="#" onclick="return false" style="color:var(--blue);text-decoration:none;cursor:pointer"></a>
+      </div>
+      <button id="gp-launch-btn" onclick="launchGraphSession()" style="width:100%;padding:8px;border:1px solid var(--green);background:transparent;color:var(--green);border-radius:4px;cursor:pointer;font-family:inherit;font-size:13px;font-weight:600">打开 Session</button>
     </div>
   </div>
 </div>
@@ -1479,6 +1500,10 @@ async function main() {
         m.total_messages = (m.total_messages || 0) + (p.total_messages || 0);
         m.total_tool_calls = (m.total_tool_calls || 0) + (p.total_tool_calls || 0);
         if ((p.last_active || '') > (m.last_active || '')) m.last_active = p.last_active;
+        // Merge points from sub-projects
+        if (p.points && p.points.length) {
+          m.points = (m.points || []).concat(p.points);
+        }
         if (p.first_seen && (!m.first_seen || p.first_seen < m.first_seen)) m.first_seen = p.first_seen;
       }
     }
@@ -1528,7 +1553,7 @@ function relativeTime(ts) {
 
 // ── Force-directed graph for discussion-decision pairs ──
 let graphNodes = [], graphEdges = [], graphAnim = null, graphDragging = null;
-let graphMouse = { x: 0, y: 0 }, graphHover = null;
+let graphMouse = { x: 0, y: 0 }, graphHover = null, graphDragStart = null;
 let starTexCache = {};
 
 function makeGraphStarTex(color) {
@@ -1629,24 +1654,27 @@ function openGraph(proj) {
       if (dx*dx + dy*dy < (n.radius+6)*(n.radius+6)) { graphHover = n; break; }
     }
     canvas.style.cursor = graphHover ? 'pointer' : 'default';
-    const tip = document.getElementById('graph-node-tooltip');
+  };
+  canvas.onmousedown = (e) => {
     if (graphHover) {
-      tip.style.display = 'block';
-      tip.style.left = (graphMouse.x + 16) + 'px';
-      tip.style.top = (graphMouse.y - 10) + 'px';
-      tip.querySelector('.gnt-type').textContent = '讨论-决策';
-      tip.querySelector('.gnt-type').style.color = '#58a6ff';
-      tip.querySelector('.gnt-label').textContent = graphHover.topic;
-      tip.querySelector('.gnt-summary').innerHTML =
-        `<strong>决策:</strong> ${escapeHTML(graphHover.decision)}<br>` +
-        `<span style="color:var(--blue);font-size:11px;cursor:pointer" onclick="closeGraph();openPanel(null,'${graphHover.session_id}')">查看原始 session →</span>`;
-    } else {
-      tip.style.display = 'none';
+      // Check if it's a drag or a click — start potential drag
+      graphDragging = graphHover;
+      graphDragStart = { x: graphMouse.x, y: graphMouse.y };
     }
   };
-  canvas.onmousedown = () => { if (graphHover) graphDragging = graphHover; };
-  canvas.onmouseup = () => { graphDragging = null; };
-  canvas.onmouseleave = () => { graphDragging = null; graphHover = null; document.getElementById('graph-node-tooltip').style.display = 'none'; };
+  canvas.onmouseup = (e) => {
+    if (graphDragging && graphDragStart) {
+      const dx = graphMouse.x - graphDragStart.x;
+      const dy = graphMouse.y - graphDragStart.y;
+      // If barely moved, treat as click → open panel
+      if (dx*dx + dy*dy < 25) {
+        openGraphPanel(graphDragging);
+      }
+    }
+    graphDragging = null;
+    graphDragStart = null;
+  };
+  canvas.onmouseleave = () => { graphDragging = null; graphHover = null; };
 
   if (graphAnim) cancelAnimationFrame(graphAnim);
   let tickCount = 0;
@@ -1727,7 +1755,51 @@ function openGraph(proj) {
 
 function closeGraph() {
   document.getElementById('graph-overlay').classList.remove('visible');
+  document.getElementById('graph-side-panel').classList.remove('open');
   if (graphAnim) { cancelAnimationFrame(graphAnim); graphAnim = null; }
+}
+
+let graphCurrentNode = null;
+
+function openGraphPanel(node) {
+  graphCurrentNode = node;
+  const panel = document.getElementById('graph-side-panel');
+  document.getElementById('gp-topic').textContent = node.topic;
+  document.getElementById('gp-discussion').textContent = node.topic;
+  document.getElementById('gp-decision').textContent = node.decision;
+  const sessionLink = document.getElementById('gp-session-link');
+  const sid = node.session_id;
+  const shortId = sid ? sid.slice(0, 8) : '?';
+  sessionLink.textContent = `session ${shortId}...`;
+  sessionLink.onclick = () => { closeGraph(); openPanel(null, sid); return false; };
+  panel.classList.add('open');
+}
+
+function closeGraphPanel() {
+  document.getElementById('graph-side-panel').classList.remove('open');
+  graphCurrentNode = null;
+}
+
+async function launchGraphSession() {
+  if (!graphCurrentNode || !graphCurrentNode.session_id) return;
+  const btn = document.getElementById('gp-launch-btn');
+  btn.disabled = true;
+  btn.textContent = '打开中...';
+  try {
+    const resp = await fetch(`/api/sessions2/launch/${graphCurrentNode.session_id}`, { method: 'POST' });
+    const data = await resp.json();
+    if (data.ok) {
+      btn.textContent = '已打开';
+      btn.style.borderColor = 'var(--muted)';
+      btn.style.color = 'var(--muted)';
+    } else {
+      btn.textContent = '失败: ' + (data.error || '');
+      btn.disabled = false;
+    }
+  } catch (err) {
+    btn.textContent = '失败';
+    btn.disabled = false;
+  }
 }
 
 function checkStaleness(lastAnalysis) {

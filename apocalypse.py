@@ -790,7 +790,28 @@ def update_workspace():
     else:
         print(f"  {DIM}所有项目已有标题和标签。{RESET}")
 
-    print(f"  {DIM}打开 http://localhost:7749/workspace.html 查看更新后的星图。{RESET}\n")
+    # Step 5: Extract discussion-decision points for new sessions
+    print(f"\n  {DIM}提取讨论-决策节点...{RESET}")
+    init_script = str(WORKSPACE.parent.parent / "skills" / "apocalypse" / "workspace_init.py")
+    result = subprocess.run(
+        [sys.executable, init_script, "--extract-points"],
+        capture_output=True, text=True, timeout=600,
+    )
+    points_total = 0
+    for line in result.stdout.strip().split("\n"):
+        line = line.strip()
+        if not line: continue
+        try:
+            evt = json.loads(line)
+            if evt.get("type") == "done":
+                points_total = evt.get("total_points", 0)
+        except Exception: pass
+    if points_total > 0:
+        print(f"  {GREEN}提取了 {points_total} 个讨论-决策节点。{RESET}")
+    else:
+        print(f"  {DIM}没有新的讨论-决策节点需要提取。{RESET}")
+
+    print(f"\n  {DIM}打开 http://localhost:7749/workspace.html 查看更新后的星图。{RESET}\n")
 
 
 def main():
