@@ -557,6 +557,99 @@ def search_sessions(query, limit=20):
     return results[:limit]
 
 
+def get_compact_conversation(session_id):
+    """Return filtered conversation: user messages + assistant text only.
+    Long assistant messages (>100 chars) are summarized via Haiku and cached."""
+    # Check cache in workspace.json
+    ws = _load_workspace()
+    cache_key = f"compact_{session_id}"
+    if ws:
+        cached = ws.get("_compact_cache", {}).get(cache_key)
+        if cached:
+            return cached
+
+    tpath = _find_transcript_path(session_id)
+    if not tpath:
+        return []
+
+    # Filter to user + assistant text only
+    messages = []
+    try:
+        with open(tpath, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except Exception:
+                    continue
+                t = d.get("type", "")
+                if t not in ("user", "assistant"):
+                    continue
+                if _is_noise_user(d) if t == "user" else False:
+                    continue
+                msg = d.get("message") or {}
+                content = msg.get("content", [])
+                if isinstance(content, str):
+                    content = [{"type": "text", "text": content}]
+                if not isinstance(content, list):
+                    continue
+                texts = [c.get("text", "").strip() for c in content
+                         if isinstance(c, dict) and c.get("type") == "text" and (c.get("text") or "").strip()]
+                if texts:
+                    combined = "\n".join(texts)
+                    messages.append({"role": t, "text": combined})
+    except Exception:
+        return []
+
+    # Summarize long assistant messages via Haiku
+    long_msgs = [(i, m) for i, m in enumerate(messages)
+                 if m["role"] == "assistant" and len(m["text"]) > 100]
+
+    if long_msgs:
+        try:
+            import anthropic
+            client = anthropic.Anthropic()
+            for idx, m in long_msgs:
+                try:
+                    resp = client.messages.create(
+                        model="claude-haiku-4-5-20251001",
+                        max_tokens=256,
+                        messages=[{"role": "user", "content":
+                            f"Summarize this Claude Code reply in 1-2 sentences in the same language as the original:\n\n{m['text'][:1500]}"}],
+                    )
+                    summary = ""
+                    for block in resp.content:
+                        if hasattr(block, "text"):
+                            summary = block.text.strip()
+                            break
+                    if summary:
+                        messages[idx]["summary"] = summary
+                except Exception:
+                    pass
+        except ImportError:
+            pass
+
+    # Cache result
+    if ws is not None:
+        if "_compact_cache" not in ws:
+            ws["_compact_cache"] = {}
+        ws["_compact_cache"][cache_key] = messages
+        # Only keep last 50 cached conversations
+        cache = ws["_compact_cache"]
+        if len(cache) > 50:
+            oldest = sorted(cache.keys())[:len(cache) - 50]
+            for k in oldest:
+                del cache[k]
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = WORKSPACE_FILE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(ws, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, WORKSPACE_FILE)
+
+    return messages
+
+
 def _launch_in_terminal(command):
     """Launch a command in a new terminal window/tab."""
     import shutil, subprocess
@@ -668,6 +761,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.wfile.write(body)
             else:
                 self.send_json({"error": "not found"}, 404)
+
+        elif path.endswith("/compact") and path.startswith("/api/sessions2/"):
+            # GET /api/sessions2/<id>/compact — filtered + summarized conversation
+            session_id = path[len("/api/sessions2/"):-len("/compact")]
+            if not session_id:
+                self.send_json({"error": "bad id"}, 400)
+                return
+            self.send_json(get_compact_conversation(session_id))
 
         elif path.startswith("/api/sessions2/"):
             session_id = path[len("/api/sessions2/"):]

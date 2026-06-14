@@ -350,6 +350,10 @@
         <a id="gp-session-link" href="#" onclick="return false" style="color:var(--blue);text-decoration:none;cursor:pointer"></a>
       </div>
       <button id="gp-launch-btn" onclick="launchGraphSession()" style="width:100%;padding:8px;border:1px solid var(--green);background:transparent;color:var(--green);border-radius:4px;cursor:pointer;font-family:inherit;font-size:13px;font-weight:600">打开 Session</button>
+      <div style="margin-top:16px;border-top:1px solid var(--border);padding-top:12px">
+        <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:8px">对话记录</div>
+        <div id="gp-conversation" style="max-height:40vh;overflow-y:auto"></div>
+      </div>
     </div>
   </div>
 </div>
@@ -1772,7 +1776,38 @@ function openGraphPanel(node) {
   const shortId = sid ? sid.slice(0, 8) : '?';
   sessionLink.textContent = `session ${shortId}...`;
   sessionLink.onclick = () => { closeGraph(); openPanel(null, sid); return false; };
+  // Load compact conversation
+  loadCompactConversation(sid);
   panel.classList.add('open');
+}
+
+async function loadCompactConversation(sessionId) {
+  const convEl = document.getElementById('gp-conversation');
+  if (!convEl) return;
+  convEl.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:8px 0">加载对话记录...</div>';
+  try {
+    const resp = await fetch(`/api/sessions2/${sessionId}/compact`);
+    if (!resp.ok) throw new Error('not found');
+    const msgs = await resp.json();
+    if (!msgs.length) {
+      convEl.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:8px 0">无对话记录</div>';
+      return;
+    }
+    convEl.innerHTML = '';
+    for (const m of msgs) {
+      const div = document.createElement('div');
+      div.style.cssText = 'margin-bottom:10px;';
+      const roleColor = m.role === 'user' ? 'var(--green)' : 'var(--blue)';
+      const roleName = m.role === 'user' ? '用户' : 'Claude';
+      const text = m.summary || m.text;
+      const isSummary = !!m.summary;
+      div.innerHTML = `<div style="font-size:10px;color:${roleColor};text-transform:uppercase;letter-spacing:0.08em;margin-bottom:2px">${roleName}${isSummary ? ' (摘要)' : ''}</div>` +
+        `<div style="font-size:12px;color:var(--text);line-height:1.5;white-space:pre-wrap;word-break:break-word">${escapeHTML(text)}</div>`;
+      convEl.appendChild(div);
+    }
+  } catch (err) {
+    convEl.innerHTML = `<div style="color:var(--muted);font-size:12px;padding:8px 0">无法加载对话记录</div>`;
+  }
 }
 
 function closeGraphPanel() {
