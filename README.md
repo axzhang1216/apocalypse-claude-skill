@@ -117,6 +117,35 @@ apocalypse --list       # 输出 JSON（non-interactive）
 
 ---
 
+## 🔌 插件 / Plugin — apocalypse-openclaw (Remote Control)
+
+**Remote-control your local Claude Code sessions from anywhere — chat with them, ask them questions, unstick them, all from a remote interface.**
+
+让远程 chat / 助手通过 Apocalypse API + `ccr code` CLI 操控本地 Claude Code session。
+
+OpenClaw is a bridge that turns the Apocalypse HTTP API into a control surface for remote agents (e.g. OpenClaw chat). It treats every local Claude Code session as a queryable object.
+
+**What you can do remotely:**
+
+| Action | Method |
+|--------|--------|
+| 📋 List all sessions | `GET http://localhost:7749/api/sessions2` |
+| 📖 Read any session's transcript | `GET http://localhost:7749/api/sessions2/<id>` |
+| 💬 Ask a past session a question | `ccr code --resume <id> --print -p "your question"` |
+| 🚨 Detect stuck sessions (waiting for input) | Check `status: "waiting"` in `~/.claude/sessions/<PID>.json` |
+| 🛑 Kill stuck process | `Stop-Process -Id <PID> -Force` |
+| ✅ Approve permission prompts / answer choices | `ccr code --resume <id> --print -p "y"` |
+| 🔧 Fix corrupted JSONL (after concurrent writes) | Filter valid JSON lines from `.jsonl` |
+
+**Requirements:**
+
+- Apocalypse dashboard running at `http://localhost:7749` (this repo)
+- `ccr code` CLI in PATH (Claude Code wrapped by [claude-code-router](https://github.com/musistudio/claude-code-router))
+
+**Files:** `skills/apocalypse-openclaw/SKILL.md`
+
+---
+
 ## Install
 
 ```bash
@@ -175,6 +204,9 @@ apocalypse-claude-skill/
 ├── hooks/
 │   ├── on-tool.sh       # PreToolUse + PostToolUse hook
 │   └── on-stop.sh       # Stop hook
+├── skills/
+│   └── apocalypse-openclaw/
+│       └── SKILL.md     # Plugin: remote-control Claude Code via Apocalypse API
 └── assets/              # Nebula textures, Three.js bundle
 ```
 
