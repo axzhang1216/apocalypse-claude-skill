@@ -11,6 +11,10 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+# Load platform_utils from the same directory as this script.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from platform_utils import launch_in_terminal  # noqa: E402
+
 PORT = 7749
 DATA_DIR = Path.home() / ".claude" / "apocalypse"
 EVENTS_FILE = DATA_DIR / "events.jsonl"
@@ -651,17 +655,12 @@ def get_compact_conversation(session_id):
 
 
 def _launch_in_terminal(command):
-    """Launch a command in a new terminal window/tab."""
-    import shutil, subprocess
-    if sys.platform == "win32":
-        wt = shutil.which("wt")
-        if wt:
-            subprocess.Popen([wt, "-w", "0", "nt", "--title", "Claude Code",
-                              "cmd", "/k", command])
-        else:
-            os.system(f'start "Claude Code" cmd /k "{command}"')
-    else:
-        subprocess.Popen(["bash", "-c", f"{command} &"], start_new_session=True)
+    """Launch a command in a new terminal window/tab.
+
+    Delegates to platform_utils for actual OS-specific behaviour. Kept
+    as a thin wrapper so existing call sites in this file don't change.
+    """
+    launch_in_terminal(command)
 
 
 # ──────────────────────────────── HTTP handler ────────────────────────────────
@@ -756,6 +755,31 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 body = fpath.read_bytes()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/javascript; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            else:
+                self.send_json({"error": "not found"}, 404)
+
+        elif path.startswith("/nebula_") and path.endswith(".png"):
+            fpath = Path(__file__).parent / path.lstrip("/")
+            if fpath.exists():
+                body = fpath.read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", "image/png")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            else:
+                self.send_json({"error": "not found"}, 404)
+
+        elif path in ("/mesh1.png", "/mesh2.png", "/mesh3.png"):
+            fpath = Path(__file__).parent / path.lstrip("/")
+            if fpath.exists():
+                body = fpath.read_bytes()
+                ct = "image/png" if path.endswith(".png") else "image/jpeg"
+                self.send_response(200)
+                self.send_header("Content-Type", ct)
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
@@ -916,14 +940,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                     break
                     except Exception:
                         pass
-            # Determine command: ccr code or claude
+            # Determine command: claude (default)
             import shutil
-            ccr_path = shutil.which("ccr")
-            if ccr_path:
-                cmd = f'"{ccr_path}" code --resume {session_id}'
-            else:
-                claude_path = shutil.which("claude") or "claude"
-                cmd = f'"{claude_path}" --resume {session_id}'
+            claude_path = shutil.which("claude") or "claude"
+            cmd = f'"{claude_path}" --resume {session_id} --dangerously-skip-permissions'
             if cwd:
                 cmd = f'cd /d "{cwd}" && {cmd}'
             try:

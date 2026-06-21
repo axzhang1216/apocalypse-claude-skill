@@ -24,7 +24,9 @@ server_alive() {
     local pid
     pid=$(cat "$PID_FILE" 2>/dev/null) || return 1
     [ -n "$pid" ] || return 1
-    # MINGW / Git Bash: kill -0 may not see Windows PIDs; also probe the port.
+    # kill -0 is the standard PID-liveness check on macOS/Linux. Under
+    # Git Bash on Windows it may not see Windows PIDs; the port probe
+    # below catches that case either way.
     if kill -0 "$pid" 2>/dev/null; then
         return 0
     fi

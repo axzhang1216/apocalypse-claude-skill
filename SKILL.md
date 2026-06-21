@@ -15,6 +15,8 @@ When this skill is invoked, run the startup script and report the URL. Then chec
    bash ~/.claude/skills/apocalypse/start.sh
    ```
 
+   Cross-platform: works on Windows (Git Bash), macOS, and Linux. The script auto-detects the platform and resolves a working Python (`python3` on Unix, `python` on Windows). Terminal launches for `claude --resume` use Windows Terminal / `cmd /k` on Windows, a `.command` script opened in Terminal.app on macOS, and the system terminal (XDG `x-terminal-emulator` or fallback chain) on Linux — all in `skills_apocalypse/platform_utils.py`.
+
 2. Tell the user:
    - The dashboard is at **http://localhost:7749**
    - It shows real-time status for every Claude Code session on this machine

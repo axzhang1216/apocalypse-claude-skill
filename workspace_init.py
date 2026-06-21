@@ -19,6 +19,29 @@ DATA_DIR = Path.home() / ".claude" / "apocalypse"
 WORKSPACE_FILE = DATA_DIR / "workspace.json"
 HAIKU_MODEL = "claude-haiku-4-5-20251001"
 
+
+def _load_anthropic_creds():
+    """Make sure ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL are set. If not, try to
+    read them from ~/.claude/settings.json (Claude Code's own config)."""
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return
+    settings = Path.home() / ".claude" / "settings.json"
+    if not settings.exists():
+        return
+    try:
+        with open(settings, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        env = cfg.get("env", {})
+        if env.get("ANTHROPIC_AUTH_TOKEN"):
+            os.environ["ANTHROPIC_API_KEY"] = env["ANTHROPIC_AUTH_TOKEN"]
+        if env.get("ANTHROPIC_BASE_URL"):
+            os.environ["ANTHROPIC_BASE_URL"] = env["ANTHROPIC_BASE_URL"]
+    except Exception:
+        pass
+
+
+_load_anthropic_creds()
+
 SKIP_TYPES = {
     "attachment", "file-history-snapshot", "last-prompt", "permission-mode",
     "ai-title", "queue-operation", "hook_success", "hook_failure", "system",
@@ -509,25 +532,186 @@ def set_themes():
     print(json.dumps({"type": "projects_updated", "count": count}, ensure_ascii=False), flush=True)
 
 
+def _parse_transcript_for_points(path: Path):
+    """Parse a transcript into user_msgs (filtered user messages) and transcript
+    (non-noise user + assistant text entries, preserving order).
+    Each entry has {role, ts, text, line_no}; user_msgs also has {idx} for its
+    position in the filtered user-only list.
+    """
+    user_msgs = []
+    transcript = []
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for line_no, raw in enumerate(f):
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    d = json.loads(raw)
+                except Exception:
+                    continue
+                t = d.get("type", "")
+                if t not in ("user", "assistant"):
+                    continue
+                if t == "user" and _is_noise_user_record(d):
+                    continue
+                msg = d.get("message") or {}
+                cb = msg.get("content", [])
+                if isinstance(cb, str):
+                    cb = [{"type": "text", "text": cb}]
+                if not isinstance(cb, list):
+                    continue
+                texts = [c.get("text", "").strip() for c in cb
+                         if isinstance(c, dict) and c.get("type") == "text" and (c.get("text") or "").strip()]
+                if not texts:
+                    continue
+                combined = "\n".join(texts)
+                ts = d.get("timestamp", "") or ""
+                entry = {"role": t, "ts": ts, "text": combined, "line_no": line_no}
+                transcript.append(entry)
+                if t == "user":
+                    user_msgs.append({**entry, "idx": len(user_msgs)})
+    except Exception:
+        return [], []
+    return user_msgs, transcript
+
+
+def _slice_messages(transcript, user_msgs, first_user_idx, next_user_idx):
+    """Slice transcript entries from user_msgs[first_user_idx] (inclusive) up to
+    user_msgs[next_user_idx] (exclusive), preserving original order.
+    Returns [{role, ts, text}, ...] suitable for point.messages.
+    """
+    if first_user_idx >= len(user_msgs):
+        return []
+    first_line = user_msgs[first_user_idx]["line_no"]
+    last_line = user_msgs[next_user_idx]["line_no"] if next_user_idx < len(user_msgs) else float("inf")
+    out = []
+    for e in transcript:
+        if e["line_no"] < first_line:
+            continue
+        if e["line_no"] >= last_line:
+            break
+        out.append({"role": e["role"], "ts": e["ts"], "text": e["text"]})
+    return out
+
+
+def _summarize_long_assistant(client, text):
+    """Summarize a long assistant message via Haiku (1-2 sentences, same language)."""
+    try:
+        resp = client.messages.create(
+            model=HAIKU_MODEL,
+            max_tokens=256,
+            messages=[{"role": "user", "content":
+                "Summarize this Claude Code reply in 1-2 sentences in the same language as the original:\n\n" + text[:1500]}],
+        )
+        for block in resp.content:
+            if hasattr(block, "text"):
+                return block.text.strip()
+    except Exception:
+        return None
+    return None
+
+
+def _summarize_messages(client, messages, threshold=200):
+    """Pre-summarize long assistant messages. Mutates in place, adding a `summary`
+    field to entries that are summarized (full `text` is preserved)."""
+    for i, m in enumerate(messages):
+        if m["role"] == "assistant" and len(m["text"]) > threshold:
+            s = _summarize_long_assistant(client, m["text"])
+            if s:
+                messages[i]["summary"] = s
+
+
+def _haiku_group_user_messages(client, user_msgs, session_meta):
+    """Ask Haiku to group user messages by topic (consecutive same-topic = one point).
+    Returns list of {user_indices, topic, decision, related_topics} or [] on failure.
+    """
+    user_list = "\n".join("[U" + str(u["idx"]) + "] " + u["text"][:300] for u in user_msgs)
+    session_goal = session_meta.get("user_goal", "unknown")
+    prompt = (
+        "You are analyzing a Claude Code session's user messages in order.\n"
+        "The user talks about several different topics across the conversation. Each time the user SWITCHES to a new topic, that starts a NEW discussion-decision pair.\n"
+        "Rules:\n"
+        "- Consecutive user messages on the SAME topic = one discussion-decision pair (merge them).\n"
+        "- The moment the user asks about a different topic, cut. Previous messages belong to the previous pair; the new message starts a new pair.\n"
+        "- If the entire session is one continuous topic, return a single group with all user message indices.\n"
+        "Session goal: " + session_goal + "\n"
+        "User messages in order:\n" + user_list + "\n"
+        "Reply in JSON only (no markdown fences):\n"
+        "{\n"
+        '  "groups": [\n'
+        "    {\n"
+        '      "user_indices": [0, 1, 2],\n'
+        '      "topic": "short topic label (max 25 chars)",\n'
+        '      "decision": "what was decided or done in this exchange (one sentence)",\n'
+        '      "related_topics": ["topic label of another group in this list that is causally/topically related"]\n'
+        "    }\n"
+        "  ]\n"
+        "}\n"
+        "Rules:\n"
+        "- user_indices are zero-based, in ascending order.\n"
+        "- Every user index must appear in exactly one group (cover all indices).\n"
+        "- topic should be short and specific.\n"
+        "- decision is concrete: what tool, what approach, what was changed, or current state.\n"
+        "- related_topics links groups within this session that are related; leave [] if none."
+    )
+    try:
+        resp = client.messages.create(
+            model=HAIKU_MODEL,
+            max_tokens=2048,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = ""
+        for block in resp.content:
+            if hasattr(block, "text"):
+                text = block.text.strip()
+                break
+        if text.startswith("```"):
+            lines = text.split("\n")
+            text = "\n".join(lines[1:-1]) if len(lines) > 2 else text
+        result = json.loads(text)
+    except Exception:
+        return None
+    return result.get("groups") or []
+
+
 def extract_points():
-    """Extract discussion-decision pairs from sessions using Haiku."""
+    """Extract discussion-decision pairs from sessions using Haiku.
+
+    Per-session flow:
+      1. Parse transcript into user_msgs + transcript entries (text-only, no noise).
+      2. If no user messages, skip.
+      3. Ask Haiku to group user messages by topic (consecutive same-topic merges).
+      4. For each group, slice the transcript (user + assistant text) between the
+         first user_msg of the group and the first user_msg of the next group.
+      5. Pre-summarize long assistant messages in each slice (so runtime display
+         is fast — no Haiku calls on the hot path).
+      6. Save as point.messages on the project's points array.
+
+    Re-runs only re-process sessions whose existing points lack the `messages` field.
+    """
     try:
         import anthropic
     except ImportError:
-        print(json.dumps({"type": "error", "message": "anthropic SDK not installed"}), flush=True)
+        print(json.dumps({"type": "error", "message": "anthropic SDK not installed"}, ensure_ascii=False), flush=True)
         sys.exit(1)
 
     client = anthropic.Anthropic()
     ws = load_workspace()
     total_extracted = 0
+    total_summarized = 0
 
     for proj_key, proj in ws.get("projects", {}).items():
         analyzed = proj.get("analyzed_sessions", {})
         all_points = proj.get("points", [])
+        points_by_sid = {}
+        for p in all_points:
+            points_by_sid.setdefault(p.get("session_id"), []).append(p)
 
         for sid, s in analyzed.items():
-            # Skip already-extracted sessions
-            if any(p.get("session_id") == sid for p in all_points):
+            sess_points = points_by_sid.get(sid, [])
+            # Skip if every existing point for this session already has messages
+            if sess_points and all(p.get("messages") for p in sess_points):
                 continue
 
             msg_count = s.get("msg_count", 0)
@@ -536,147 +720,84 @@ def extract_points():
 
             # Read transcript
             path = None
-            for jf in PROJECTS_DIR.glob(f"*/{sid}.jsonl"):
+            for jf in PROJECTS_DIR.glob("*/" + sid + ".jsonl"):
                 path = jf
                 break
             if not path:
                 continue
 
-            # Build conversation context
-            trace_parts = []
-            try:
-                with open(path, "r", encoding="utf-8", errors="replace") as f:
-                    user_count = 0
-                    for raw in f:
-                        raw = raw.strip()
-                        if not raw:
-                            continue
-                        try:
-                            d = json.loads(raw)
-                        except Exception:
-                            continue
-                        t = d.get("type", "")
-                        if t == "user":
-                            if _is_noise_user_record(d):
-                                continue
-                            msg = d.get("message") or {}
-                            content = msg.get("content", [])
-                            texts = _extract_texts(content)
-                            if texts:
-                                user_count += 1
-                                trace_parts.append(f"[User {user_count}] {' '.join(texts)[:600]}")
-                        elif t == "assistant":
-                            msg = d.get("message") or {}
-                            content = msg.get("content", [])
-                            if isinstance(content, str):
-                                content = [{"type": "text", "text": content}]
-                            if not isinstance(content, list):
-                                continue
-                            texts = [c.get("text", "") for c in content
-                                     if isinstance(c, dict) and c.get("type") == "text" and (c.get("text") or "").strip()]
-                            if texts:
-                                trace_parts.append(f"[Assistant] {texts[-1][:600]}")
-            except Exception:
+            user_msgs, transcript = _parse_transcript_for_points(path)
+            if not user_msgs:
                 continue
 
-            if not trace_parts:
+            groups = _haiku_group_user_messages(client, user_msgs, s)
+            if not groups:
                 continue
 
-            conversation = "\n".join(trace_parts[:8])
-
-            prompt = f"""Analyze this Claude Code session and extract discussion-decision pairs.
-
-Session goal: {s.get('user_goal', 'unknown')}
-Category: {s.get('category', 'other')}
-
-Conversation:
-{conversation}
-
-Each "point" is ONE complete discussion-decision process: what was discussed AND what was decided/done.
-
-Reply in JSON only (no markdown fences):
-{{
-  "points": [
-    {{
-      "topic": "what was discussed (short, max 25 chars)",
-      "decision": "what was decided or done (one sentence)",
-      "related_topics": ["topic of another related point"]
-    }}
-  ]
-}}
-
-Rules:
-- Each point MUST have both a topic (the question/problem) and a decision (the answer/solution)
-- Extract 2-6 points per session
-- related_topics connects points that are causally or topically related
-- Keep topic short and specific (this is the node label)
-- decision should be concrete: what tool, what approach, what was changed
-- If a discussion had no clear decision, the decision field summarizes the conclusion or current state"""
-
-            try:
-                response = client.messages.create(
-                    model=HAIKU_MODEL,
-                    max_tokens=1024,
-                    messages=[{"role": "user", "content": prompt}],
-                )
-                text = ""
-                for block in response.content:
-                    if hasattr(block, "text"):
-                        text = block.text.strip()
-                        break
-                if text.startswith("```"):
-                    lines = text.split("\n")
-                    text = "\n".join(lines[1:-1]) if len(lines) > 2 else text
-                result = json.loads(text)
-            except Exception:
-                continue
-
-            # Build points with IDs and resolve relations
-            points_data = result.get("points", [])
+            # Build new points for this session, replacing any existing ones
+            new_points_for_sid = []
             topic_to_id = {}
-            for p in points_data:
-                pid = f"{sid[:8]}_{total_extracted}"
+            for g_idx, g in enumerate(groups):
+                idxs = g.get("user_indices") or []
+                idxs = [i for i in idxs if 0 <= i < len(user_msgs)]
+                if not idxs:
+                    continue
+                first_idx = idxs[0]
+                if g_idx + 1 < len(groups):
+                    next_first = (groups[g_idx + 1].get("user_indices") or [len(user_msgs)])[0]
+                else:
+                    next_first = len(user_msgs)
+                if next_first <= first_idx:
+                    next_first = len(user_msgs)
+                msgs = _slice_messages(transcript, user_msgs, first_idx, next_first)
+                _summarize_messages(client, msgs)
+                total_summarized += sum(1 for m in msgs if m.get("summary"))
+                pid = sid[:8] + "_" + str(total_extracted)
                 total_extracted += 1
-                topic = p.get("topic", "")
-                topic_to_id[topic] = pid
-                all_points.append({
+                topic = (g.get("topic") or "").strip()[:60]
+                decision = (g.get("decision") or "").strip()
+                ts = user_msgs[first_idx].get("ts") or s.get("ts", "")
+                point = {
                     "id": pid,
                     "session_id": sid,
                     "topic": topic,
-                    "decision": p.get("decision", ""),
-                    "ts": s.get("ts", ""),
+                    "decision": decision,
+                    "ts": ts,
                     "related_to": [],
-                })
+                    "messages": msgs,
+                }
+                new_points_for_sid.append(point)
+                topic_to_id[topic] = pid
 
-            # Second pass: resolve cross-references within this batch
-            for p in points_data:
-                pid = topic_to_id.get(p.get("topic", ""))
-                if not pid:
-                    continue
+            # Cross-references within this session
+            for g, point in zip(groups, new_points_for_sid):
                 related_ids = []
-                for rt in p.get("related_topics", []):
+                for rt in (g.get("related_topics") or []):
                     if rt in topic_to_id:
                         related_ids.append(topic_to_id[rt])
-                for pt in all_points:
-                    if pt["id"] == pid:
-                        pt["related_to"] = related_ids
-                        break
+                point["related_to"] = related_ids
+
+            # Replace this session's points with the newly built ones
+            all_points = [p for p in all_points if p.get("session_id") != sid]
+            all_points.extend(new_points_for_sid)
+
+            print(json.dumps({
+                "type": "points_extracted",
+                "session": sid[:8],
+                "project": proj.get("name", ""),
+                "points": len(new_points_for_sid),
+            }, ensure_ascii=False), flush=True)
 
         proj["points"] = all_points
         save_workspace(ws)
 
-        if all_points:
-            print(json.dumps({
-                "type": "points_extracted",
-                "project": proj.get("name", ""),
-                "total_points": len(all_points),
-            }, ensure_ascii=False), flush=True)
-
-    # Cross-session relation pass: find related points across sessions
     print(json.dumps({
         "type": "done",
         "total_points": total_extracted,
+        "total_summarized": total_summarized,
     }, ensure_ascii=False), flush=True)
+
+
 
 
 if __name__ == "__main__":

@@ -17,12 +17,14 @@ import sys
 from pathlib import Path
 from datetime import datetime, timezone
 
+# Load platform_utils from the same directory as this script.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from platform_utils import launch_in_terminal  # noqa: E402
+
 if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 if sys.stderr.encoding and sys.stderr.encoding.lower() != "utf-8":
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
-if sys.platform == "win32":
-    os.system("")
 
 WORKSPACE = Path.home() / ".claude" / "apocalypse" / "workspace.json"
 PROJECTS_DIR = Path.home() / ".claude" / "projects"
@@ -479,32 +481,25 @@ def _find_cwd_for_session(session_id):
 
 
 def launch_session(session):
-    """Open ccr code --resume in a new Windows Terminal tab (or new window)."""
-    import tempfile
+    """Open claude --resume in a new terminal tab/window."""
     sid = session["id"]
     cwd = session.get("cwd", "") or _find_cwd_for_session(sid)
-    ccr_path = shutil.which("ccr") or "ccr"
-    print(f"\n  {DIM}启动: cd {cwd} && ccr code --resume {sid}{RESET}")
 
-    if sys.platform == "win32":
-        # Write a temp .bat to avoid quoting issues
-        bat = tempfile.NamedTemporaryFile(mode="w", suffix=".bat", delete=False, encoding="utf-8", dir=str(Path.home()))
-        bat.write(f"@echo off\n")
-        if cwd:
-            bat.write(f'cd /d "{cwd}"\n')
-        bat.write(f'"{ccr_path}" code --resume {sid}\n')
-        bat.close()
+    claude_path = shutil.which("claude") or "claude"
+    cmd = f'"{claude_path}" --resume {sid} --dangerously-skip-permissions'
+    print(f"\n  {DIM}启动: cd {cwd} && {cmd}{RESET}")
 
-        wt = shutil.which("wt")
-        if wt:
-            subprocess.Popen([wt, "-w", "0", "nt", "--title", "Claude Code",
-                              "-d", cwd or ".", "cmd", "/k", bat.name])
-        else:
-            os.system(f'start "Claude Code" cmd /k "{bat.name}"')
-    else:
-        cd_cmd = f'cd "{cwd}" && ' if cwd else ''
-        subprocess.Popen(["bash", "-c", f'{cd_cmd}{ccr_path} code --resume {sid} &'],
-                         start_new_session=True)
+    launch_in_terminal(cmd, cwd=cwd or None)
+
+
+def launch_new_conversation(project):
+    """Open a fresh claude session in the project's cwd (no --resume)."""
+    cwd = project.get("cwd", "")
+    claude_path = shutil.which("claude") or "claude"
+    cmd = f'"{claude_path}" --dangerously-skip-permissions'
+    print(f"\n  {DIM}启动新对话: cd {cwd} && {cmd}{RESET}")
+
+    launch_in_terminal(cmd, cwd=cwd or None)
 
 
 # ── Main flow ─────────────────────────────────────────────────────────────────
@@ -586,6 +581,14 @@ def project_select_flow():
 def session_select_flow(project):
     while True:
         items = []
+        # First option: start a fresh conversation in this project (no --resume)
+        cwd = project.get("cwd", "") or "(未设置)"
+        items.append({
+            "label": "✨ 在该项目中开启新对话",
+            "sub": f"cd {cwd} && claude",
+            "_new_conversation": True,
+            "color": GREEN,
+        })
         for s in project["sessions"]:
             rel = _relative_time(s["ts"]); color = CATEGORY_COLORS.get(s.get("category", ""), "")
             goal = _trunc(s["goal"], 65) if s["goal"] else "(无信息)"
@@ -599,6 +602,9 @@ def session_select_flow(project):
                  footer="↑↓ 导航  |  Enter 查看详情  |  q 返回")
         sel = m.run()
         if not sel: return None
+        if sel.get("_new_conversation"):
+            launch_new_conversation(project)
+            return None  # already launched; back to project select
         action = show_detail(sel["session"])
         if action == "resume": return sel["session"]
         if action is None: return None
