@@ -397,7 +397,9 @@ def _render_session_md(proj_title: str, session_id: str, session_meta: dict, poi
     """
     goal = session_meta.get("user_goal") or "(no recorded goal)"
     msg_count = session_meta.get("msg_count", 0)
-    exported_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    # NOTE: previously rendered an `Exported: ...` timestamp here. Removed
+    # because that made every render produce different bytes, defeating the
+    # hash-based rolling dedup. The file mtime is the export timestamp.
 
     # Title uses session goal (semantic, lets Claude find by meaning)
     title_first = goal.strip().split("\n", 1)[0].strip() or "(untitled session)"
@@ -411,7 +413,6 @@ def _render_session_md(proj_title: str, session_id: str, session_meta: dict, poi
         f"**Session ID**: `{session_id}`",
         f"**Goal**: {goal}",
         f"**Messages**: {msg_count}",
-        f"**Exported**: {exported_at}",
         "",
         "---",
         "",
@@ -437,19 +438,35 @@ def _render_session_md(proj_title: str, session_id: str, session_meta: dict, poi
             lines.append("**Related**: (none)")
         lines.append("")
 
+        # Group consecutive messages by role so a long assistant monologue
+        # doesn't repeat the "### Assistant" header on every paragraph.
+        msg_groups = []
+        current_role = None
+        current_texts = []
         for m in (p.get("messages") or []):
-            role = m.get("role", "user").capitalize()
+            role = (m.get("role", "user") or "user").capitalize()
             text = (m.get("summary") or m.get("text") or "").strip()
             if not text:
                 continue
+            if role == current_role:
+                current_texts.append(text)
+            else:
+                if current_role is not None:
+                    msg_groups.append((current_role, current_texts))
+                current_role = role
+                current_texts = [text]
+        if current_role is not None:
+            msg_groups.append((current_role, current_texts))
+
+        for role, texts in msg_groups:
             lines.append(f"### {role}")
             lines.append("")
-            # Use blockquote for multi-line; collapse blank lines
-            for ml in text.split("\n"):
-                ml = ml.strip()
-                if ml:
-                    lines.append(f"> {ml}")
-            lines.append("")
+            for text in texts:
+                for ml in text.split("\n"):
+                    ml = ml.strip()
+                    if ml:
+                        lines.append(f"> {ml}")
+                lines.append("")
 
         lines.append("---")
         lines.append("")
@@ -482,51 +499,81 @@ def _roll_session_md(main_path: Path, content: str, max_kb: int, old_kept: int) 
     `main_path` is the file we want to write (e.g. `…/2026-06-15-abc12345-init.md`).
     `content` is the newly-rendered md text.
     `max_kb` is the soft cap; `old_kept` is how many `.old.N.md` siblings to keep.
-    """
-    cap_bytes = max_kb * 1024
-    base = main_path.stem
-    parent = main_path.parent
 
+    Key invariants:
+      1. We only ROLL when the new content would not fit AND the new content
+         differs from the existing main.  Re-running export with unchanged
+         points must not churn the .old.N.md files.
+      2. On Windows, `Path.exists()` returns stale True for files that have
+         just been renamed (a quirk of the OS's open-file handle caching).
+         We use `iterdir()` instead — it reflects on-disk reality reliably.
+    """
+    import hashlib
+    cap_bytes = max_kb * 1024
+    base = main_path.stem  # `foo.md` -> `foo`, so old.N siblings are `foo.old.1.md`
+    parent = main_path.parent
     new_size = len(content.encode("utf-8"))
+    new_hash = hashlib.sha1(content.encode("utf-8")).hexdigest()
+
+    # Snapshot what's actually on disk (avoid Windows Path.exists() staleness).
+    siblings = set(f.name for f in parent.iterdir()) if parent.exists() else set()
+
+    # If main already exists with the same content, no-op entirely.
+    main_name = main_path.name
+    if main_name in siblings:
+        try:
+            existing_hash = hashlib.sha1(main_path.read_bytes()).hexdigest()
+            if existing_hash == new_hash:
+                return  # no change — don't churn .old.* files
+        except Exception:
+            pass
+
     if new_size <= cap_bytes:
-        # Fits — plain write, no rolling
+        # Fits — plain write, no rolling. Use binary mode to avoid Python's
+        # text-mode CRLF normalisation on Windows, which would corrupt the
+        # hash check above and silently change file sizes.
         tmp = main_path.with_suffix(main_path.suffix + ".tmp")
-        tmp.write_text(content, encoding="utf-8")
+        tmp.write_bytes(content.encode("utf-8"))
         os.replace(tmp, main_path)
         return
 
     # Oversized — roll.
     # Step 1: delete any .old.N.md beyond old_kept range
     for n in range(old_kept + 1, old_kept + 10):  # bounded scan; no infinite loop
-        p = parent / f"{base}.old.{n}.md"
-        if not p.exists():
+        name = f"{base}.old.{n}.md"
+        if name not in siblings:
             break
         try:
-            p.unlink()
+            (parent / name).unlink()
+            siblings.discard(name)
         except Exception as e:
-            print(f"[history-export] could not delete {p}: {e}", file=sys.stderr)
+            print(f"[history-export] could not delete {parent / name}: {e}", file=sys.stderr)
 
     # Step 2: shift kept ones up: .old.(N) -> .old.(N+1), reverse order to avoid clobbering
     for n in range(old_kept, 0, -1):
-        src = parent / f"{base}.old.{n}.md"
-        dst = parent / f"{base}.old.{n + 1}.md"
-        if src.exists():
+        src_name = f"{base}.old.{n}.md"
+        dst_name = f"{base}.old.{n + 1}.md"
+        if src_name in siblings:
             try:
-                os.replace(src, dst)
+                os.replace(parent / src_name, parent / dst_name)
+                siblings.discard(src_name)
+                siblings.add(dst_name)
             except Exception as e:
-                print(f"[history-export] could not roll {src} -> {dst}: {e}", file=sys.stderr)
+                print(f"[history-export] could not roll {parent / src_name} -> {parent / dst_name}: {e}", file=sys.stderr)
 
-    # Step 3: move current main to .old.1
-    if main_path.exists():
-        dst = parent / f"{base}.old.1.md"
+    # Step 3: move current main to .old.1 (only if main truly exists on disk)
+    if main_name in siblings:
+        dst_name = f"{base}.old.1.md"
         try:
-            os.replace(main_path, dst)
+            os.replace(main_path, parent / dst_name)
+            siblings.discard(main_name)
+            siblings.add(dst_name)
         except Exception as e:
-            print(f"[history-export] could not move {main_path} -> {dst}: {e}", file=sys.stderr)
+            print(f"[history-export] could not move {main_path} -> {parent / dst_name}: {e}", file=sys.stderr)
 
     # Step 4: write new main
     tmp = main_path.with_suffix(main_path.suffix + ".tmp")
-    tmp.write_text(content, encoding="utf-8")
+    tmp.write_bytes(content.encode("utf-8"))
     os.replace(tmp, main_path)
 
 
