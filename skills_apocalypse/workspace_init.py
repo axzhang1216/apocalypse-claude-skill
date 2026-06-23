@@ -476,6 +476,60 @@ Claude Code session 的讨论归档，按"讨论/决策"分段。
 """
 
 
+def _roll_session_md(main_path: Path, content: str, max_kb: int, old_kept: int) -> None:
+    """Write a session md, rolling old content into .old.N.md siblings if oversized.
+
+    `main_path` is the file we want to write (e.g. `…/2026-06-15-abc12345-init.md`).
+    `content` is the newly-rendered md text.
+    `max_kb` is the soft cap; `old_kept` is how many `.old.N.md` siblings to keep.
+    """
+    cap_bytes = max_kb * 1024
+    base = main_path.stem
+    parent = main_path.parent
+
+    new_size = len(content.encode("utf-8"))
+    if new_size <= cap_bytes:
+        # Fits — plain write, no rolling
+        tmp = main_path.with_suffix(main_path.suffix + ".tmp")
+        tmp.write_text(content, encoding="utf-8")
+        os.replace(tmp, main_path)
+        return
+
+    # Oversized — roll.
+    # Step 1: delete any .old.N.md beyond old_kept range
+    for n in range(old_kept + 1, old_kept + 10):  # bounded scan; no infinite loop
+        p = parent / f"{base}.old.{n}.md"
+        if not p.exists():
+            break
+        try:
+            p.unlink()
+        except Exception as e:
+            print(f"[history-export] could not delete {p}: {e}", file=sys.stderr)
+
+    # Step 2: shift kept ones up: .old.(N) -> .old.(N+1), reverse order to avoid clobbering
+    for n in range(old_kept, 0, -1):
+        src = parent / f"{base}.old.{n}.md"
+        dst = parent / f"{base}.old.{n + 1}.md"
+        if src.exists():
+            try:
+                os.replace(src, dst)
+            except Exception as e:
+                print(f"[history-export] could not roll {src} -> {dst}: {e}", file=sys.stderr)
+
+    # Step 3: move current main to .old.1
+    if main_path.exists():
+        dst = parent / f"{base}.old.1.md"
+        try:
+            os.replace(main_path, dst)
+        except Exception as e:
+            print(f"[history-export] could not move {main_path} -> {dst}: {e}", file=sys.stderr)
+
+    # Step 4: write new main
+    tmp = main_path.with_suffix(main_path.suffix + ".tmp")
+    tmp.write_text(content, encoding="utf-8")
+    os.replace(tmp, main_path)
+
+
 def run(incremental: bool = False):
     try:
         import anthropic
