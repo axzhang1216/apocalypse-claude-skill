@@ -617,6 +617,93 @@ def _update_gitignore(cwd: Path) -> None:
         print(f"[history-export] could not write {target}: {e}", file=sys.stderr)
 
 
+def export_history() -> dict:
+    """Export each project's discussion-decision points as markdown files
+    under `<project-cwd>/.apocalypse/`, update per-project CLAUDE.md marked
+    block and .gitignore. Idempotent — safe to re-run.
+
+    Returns a summary dict {projects_processed, sessions_exported, skipped}.
+    """
+    cfg = load_config()
+    if not cfg.get("export_history", True):
+        print("[history-export] disabled in config.json (export_history=false), skipping")
+        return {"projects_processed": 0, "sessions_exported": 0, "skipped": 0}
+
+    max_kb = int(cfg.get("max_md_kb", 64))
+    old_kept = int(cfg.get("old_kept", 3))
+
+    ws = load_workspace()
+    summary = {"projects_processed": 0, "sessions_exported": 0, "skipped": 0}
+
+    for proj_key, proj in ws.get("projects", {}).items():
+        cwd_str = proj.get("cwd", "")
+        if not cwd_str:
+            summary["skipped"] += 1
+            continue
+        cwd = Path(cwd_str)
+        if not cwd.exists() or not cwd.is_dir():
+            print(f"[history-export] skip {proj.get('title', proj_key)}: cwd not accessible ({cwd})", file=sys.stderr)
+            summary["skipped"] += 1
+            continue
+
+        # Always update .gitignore first so any later crash doesn't leave md untracked.
+        _update_gitignore(cwd)
+
+        apo_dir = cwd / ".apocalypse"
+        try:
+            apo_dir.mkdir(parents=True, exist_ok=True)
+            (apo_dir / "README.md").write_text(_render_apocalypse_readme(), encoding="utf-8")
+        except Exception as e:
+            print(f"[history-export] could not create {apo_dir}: {e}", file=sys.stderr)
+            summary["skipped"] += 1
+            continue
+
+        proj_title = proj.get("title") or proj.get("name") or proj_key
+        analyzed = proj.get("analyzed_sessions", {})
+        points_by_sid = {}
+        for p in proj.get("points", []) or []:
+            sid = p.get("session_id")
+            if sid:
+                points_by_sid.setdefault(sid, []).append(p)
+
+        n_sessions = 0
+        for sid, s_meta in analyzed.items():
+            session_points = points_by_sid.get(sid, [])
+            if not session_points:
+                continue
+            # Skip sessions whose points have no messages (extract-points hasn't run)
+            if not all(p.get("messages") for p in session_points):
+                continue
+
+            # Build md
+            md_text = _render_session_md(proj_title, sid, s_meta, session_points)
+            # Filename: <date>-<sid8>-<slug>.md (date from first point's ts)
+            first_ts = session_points[0].get("ts") or s_meta.get("ts") or ""
+            date_part = first_ts[:10] if first_ts else "unknown-date"
+            slug = _slugify(session_points[0].get("topic", "") or s_meta.get("user_goal", ""))
+            md_path = apo_dir / f"{date_part}-{sid[:8]}-{slug}.md"
+
+            try:
+                _roll_session_md(md_path, md_text, max_kb, old_kept)
+                n_sessions += 1
+            except Exception as e:
+                print(f"[history-export] could not write {md_path}: {e}", file=sys.stderr)
+
+        # Update CLAUDE.md marked block last (only if we managed to write something
+        # or if the directory exists — i.e. always when we got this far)
+        try:
+            _update_claude_md(cwd)
+        except Exception as e:
+            print(f"[history-export] could not update CLAUDE.md in {cwd}: {e}", file=sys.stderr)
+
+        summary["projects_processed"] += 1
+        summary["sessions_exported"] += n_sessions
+        if n_sessions:
+            print(f"[history-export] {proj_title}: {n_sessions} session(s) → {apo_dir}")
+
+    return summary
+
+
 def run(incremental: bool = False):
     try:
         import anthropic
@@ -1083,11 +1170,16 @@ if __name__ == "__main__":
                         help="Read theme mapping from stdin and update workspace.json")
     parser.add_argument("--extract-points", action="store_true",
                         help="Extract discussion-decision pairs from sessions")
+    parser.add_argument("--export-history", action="store_true",
+                        help="Export discussion-decision points as .apocalypse/ markdown per project")
     args = parser.parse_args()
     if args.dump_summaries:
         dump_summaries()
     elif args.set_themes:
         set_themes()
+    elif args.export_history:
+        result = export_history()
+        print(json.dumps({"type": "done", **result}, ensure_ascii=False))
     elif args.extract_points:
         extract_points()
     else:
