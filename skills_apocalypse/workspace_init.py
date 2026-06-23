@@ -530,6 +530,93 @@ def _roll_session_md(main_path: Path, content: str, max_kb: int, old_kept: int) 
     os.replace(tmp, main_path)
 
 
+APOCALYPSE_HISTORY_MARKER_START = "<!-- APOCALYPSE-HISTORY:START -->"
+APOCALYPSE_HISTORY_MARKER_END = "<!-- APOCALYPSE-HISTORY:END -->"
+
+APOCALYPSE_HISTORY_BLOCK = """\
+<!-- APOCALYPSE-HISTORY:START -->
+## Project History (Apocalypse)
+
+此项目过往的 Claude Code session 已自动归档到 `.apocalypse/`，按"讨论/决策"
+分章节组织（每 session 一个 md）。当用户问到本项目之前做过什么、决定过什么、
+讨论过什么时，**先读** `.apocalypse/*.md`（不带 `.old` 后缀的）再回答。
+
+- 主文件（活跃）= `.apocalypse/*.md`（无 `.old` 后缀）
+- 历史滚动文件 = `.apocalypse/*.old.*.md`（默认不读，必要时翻）
+- 目录说明 = `.apocalypse/README.md`
+
+**不要修改** `.apocalypse/` 下的文件——下次 `update workspace` 会被覆盖。
+<!-- APOCALYPSE-HISTORY:END -->"""
+
+
+def _update_claude_md(cwd: Path) -> None:
+    """Idempotently insert or replace the APOCALYPSE-HISTORY block in cwd/CLAUDE.md.
+
+    - File missing: create with just the block.
+    - Block present (START/END markers found): replace that range only.
+    - Block absent: append at end with a leading blank line.
+    Writes atomically; silent skip on permission errors.
+    """
+    import re as _re
+    target = cwd / "CLAUDE.md"
+    try:
+        existing = target.read_text(encoding="utf-8") if target.exists() else ""
+    except Exception:
+        return  # unreadable — skip silently
+
+    if APOCALYPSE_HISTORY_MARKER_START in existing and APOCALYPSE_HISTORY_MARKER_END in existing:
+        # Replace the block in place; preserve everything else verbatim
+        pattern = _re.compile(
+            _re.escape(APOCALYPSE_HISTORY_MARKER_START) + r".*?" + _re.escape(APOCALYPSE_HISTORY_MARKER_END),
+            _re.DOTALL,
+        )
+        new_content = pattern.sub(APOCALYPSE_HISTORY_BLOCK, existing)
+    else:
+        # Append with leading blank line
+        if existing and not existing.endswith("\n"):
+            existing += "\n"
+        new_content = existing + ("\n" if existing else "") + APOCALYPSE_HISTORY_BLOCK + "\n"
+
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_suffix(target.suffix + ".tmp")
+        tmp.write_text(new_content, encoding="utf-8")
+        os.replace(tmp, target)
+    except Exception as e:
+        print(f"[history-export] could not write {target}: {e}", file=sys.stderr)
+
+
+def _update_gitignore(cwd: Path) -> None:
+    """Ensure cwd/.gitignore contains a line for `.apocalypse/`.
+
+    Idempotent: uses regex to detect existing entry in multi-line mode.
+    Silent skip on permission errors.
+    """
+    import re as _re
+    target = cwd / ".gitignore"
+    pattern = _re.compile(r"^\.apocalypse/?$", _re.M)
+    try:
+        existing = target.read_text(encoding="utf-8") if target.exists() else ""
+    except Exception:
+        return
+
+    if pattern.search(existing):
+        return  # already covered
+
+    addition = ".apocalypse/\n"
+    if existing and not existing.endswith("\n"):
+        existing += "\n"
+    new_content = existing + addition
+
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_suffix(target.suffix + ".tmp")
+        tmp.write_text(new_content, encoding="utf-8")
+        os.replace(tmp, target)
+    except Exception as e:
+        print(f"[history-export] could not write {target}: {e}", file=sys.stderr)
+
+
 def run(incremental: bool = False):
     try:
         import anthropic
