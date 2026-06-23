@@ -155,3 +155,12 @@ else
         *)    echo "  First time: open a new terminal, then: apocalypse" ;;
     esac
 fi
+
+echo ""
+echo "────────────────────────────────────────────────────────────"
+echo "  Apocalypse 历史归档已默认开启"
+echo "  每次 update workspace 会把聊天按讨论/决策切块，导出到"
+echo "  各项目下的 .apocalypse/，并在 CLAUDE.md 插入说明段落。"
+echo "  关闭方法：编辑 ~/.claude/apocalypse/config.json，"
+echo "  设 \"export_history\": false"
+echo "────────────────────────────────────────────────────────────"

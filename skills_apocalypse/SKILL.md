@@ -220,6 +220,24 @@ For quick silent refresh (no UI):
 apocalypse --refresh    # runs incremental analysis only, no summary
 ```
 
+## History export
+
+Each project's discussion-decision slices (from `extract-points`) are exported as
+markdown files into `<project-cwd>/.apocalypse/`, with one `.md` per session,
+sections per discussion/decision. When this runs:
+
+- A marked block (`APOCALYPSE-HISTORY:START/END`) is inserted into the project's
+  `CLAUDE.md` pointing future Claude at the archive
+- `.apocalypse/` is added to the project's `.gitignore` automatically
+- Files roll into `.old.N.md` siblings when they exceed 64 KB (configurable)
+
+Disable by editing `~/.claude/apocalypse/config.json` (`export_history: false`).
+Re-run manually with:
+
+```bash
+python ~/.claude/skills/apocalypse/workspace_init.py --export-history
+```
+
 ## Notes
 
 Hooks are registered on first run via `~/.claude/settings.local.json`. Running this skill again is safe — it will not duplicate hooks or restart an already-running server.
