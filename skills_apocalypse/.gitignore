@@ -1,0 +1,5 @@
+# Runtime data (never commit these)
+/.claude/apocalypse/
+*.log
+*.pid
+__pycache__/
