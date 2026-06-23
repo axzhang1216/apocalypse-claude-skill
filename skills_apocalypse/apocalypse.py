@@ -819,6 +819,18 @@ def update_workspace():
 
     print(f"\n  {DIM}打开 http://localhost:7749/workspace.html 查看更新后的星图。{RESET}\n")
 
+    # ── Step 6: Export discussion-decision history into each project's .apocalypse/
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from workspace_init import export_history
+        result = export_history()
+        if result.get("sessions_exported"):
+            print(f"  {GREEN}已归档 {result['sessions_exported']} 个 session 到 {result['projects_processed']} 个项目的 .apocalypse/{RESET}")
+        elif result.get("projects_processed"):
+            print(f"  {DIM}已扫描 {result['projects_processed']} 个项目（无新增 session 需要归档）{RESET}")
+    except Exception as e:
+        print(f"  {YELLOW}历史归档失败（不影响其他功能）: {e}{RESET}")
+
 
 def main():
     parser = argparse.ArgumentParser(description="Apocalypse Launcher")
