@@ -379,6 +379,103 @@ def save_config(cfg: dict) -> None:
     os.replace(tmp, CONFIG_FILE)
 
 
+def _slugify(text: str, max_len: int = 40) -> str:
+    """Convert a topic title into a filename-safe slug, max 40 chars."""
+    import re as _re
+    s = (text or "").lower()
+    s = _re.sub(r"[^a-z0-9一-鿿]+", "-", s)
+    s = s.strip("-")
+    if len(s) > max_len:
+        s = s[:max_len].rsplit("-", 1)[0] or s[:max_len]
+    return s or "untitled"
+
+
+def _render_session_md(proj_title: str, session_id: str, session_meta: dict, points: list) -> str:
+    """Render one session's points as a Markdown document.
+
+    points: list of point dicts with keys topic, decision, ts, related_to, messages, id.
+    """
+    goal = session_meta.get("user_goal") or "(no recorded goal)"
+    msg_count = session_meta.get("msg_count", 0)
+    exported_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    # Title uses session goal (semantic, lets Claude find by meaning)
+    title_first = goal.strip().split("\n", 1)[0].strip() or "(untitled session)"
+    if len(title_first) > 120:
+        title_first = title_first[:117] + "..."
+
+    lines = [
+        f"# {title_first}",
+        "",
+        f"**Project**: {proj_title}",
+        f"**Session ID**: `{session_id}`",
+        f"**Goal**: {goal}",
+        f"**Messages**: {msg_count}",
+        f"**Exported**: {exported_at}",
+        "",
+        "---",
+        "",
+    ]
+
+    # Map point id -> "Discussion N" for related_to cross-refs
+    pid_to_n = {p.get("id", ""): i + 1 for i, p in enumerate(points)}
+
+    for i, p in enumerate(points, 1):
+        topic = (p.get("topic") or "(no topic)").strip()
+        decision = (p.get("decision") or "").strip()
+        related_ids = p.get("related_to") or []
+        related_labels = [f"Discussion {pid_to_n[rid]}" for rid in related_ids if rid in pid_to_n]
+
+        lines.append(f"## Discussion {i}: {topic}")
+        lines.append("")
+        if decision:
+            lines.append(f"**Decision**: {decision}")
+            lines.append("")
+        if related_labels:
+            lines.append(f"**Related**: {', '.join(related_labels)}")
+        else:
+            lines.append("**Related**: (none)")
+        lines.append("")
+
+        for m in (p.get("messages") or []):
+            role = m.get("role", "user").capitalize()
+            text = (m.get("summary") or m.get("text") or "").strip()
+            if not text:
+                continue
+            lines.append(f"### {role}")
+            lines.append("")
+            # Use blockquote for multi-line; collapse blank lines
+            for ml in text.split("\n"):
+                ml = ml.strip()
+                if ml:
+                    lines.append(f"> {ml}")
+            lines.append("")
+
+        lines.append("---")
+        lines.append("")
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _render_apocalypse_readme() -> str:
+    """The .apocalypse/README.md describing the directory contents."""
+    return """\
+# Apocalypse 项目历史
+
+此目录由 [Apocalypse](https://...) 自动维护。每个 `.md` 文件是一次
+Claude Code session 的讨论归档，按"讨论/决策"分段。
+
+**用途**：让未来的 Claude 看到本项目之前讨论过什么、做了什么决策。
+
+**注意事项**：
+- 主 md（不带 `.old` 后缀）是当前活跃的，会被 Apocalypse 自动重写
+- `.old.*.md` 是历史滚动文件，不会被 Claude 默认读到
+- 每次 `update workspace` 时此目录会被重新生成
+
+**不要**手动编辑此目录——下次更新会覆盖。
+"""
+
+
 def run(incremental: bool = False):
     try:
         import anthropic
