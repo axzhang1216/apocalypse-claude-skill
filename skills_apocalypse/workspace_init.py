@@ -352,6 +352,33 @@ def save_workspace(ws: dict):
     os.replace(tmp, WORKSPACE_FILE)
 
 
+def load_config() -> dict:
+    """Load ~/.claude/apocalypse/config.json, falling back to defaults.
+
+    On first call, creates the file with DEFAULT_CONFIG so users can
+    discover and edit it.
+    """
+    if not CONFIG_FILE.exists():
+        save_config(DEFAULT_CONFIG)
+        return dict(DEFAULT_CONFIG)
+    try:
+        cfg = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return dict(DEFAULT_CONFIG)
+    # Merge with defaults so new keys added in future versions get sensible values
+    merged = dict(DEFAULT_CONFIG)
+    merged.update(cfg)
+    return merged
+
+
+def save_config(cfg: dict) -> None:
+    """Atomically write ~/.claude/apocalypse/config.json."""
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = CONFIG_FILE.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, CONFIG_FILE)
+
+
 def run(incremental: bool = False):
     try:
         import anthropic
