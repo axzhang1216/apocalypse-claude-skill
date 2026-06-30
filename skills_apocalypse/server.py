@@ -27,6 +27,11 @@ WORKSPACE_HTML = Path(__file__).parent / "workspace.html"
 STALE_SECONDS = 86400  # 1 day
 TRANSCRIPT_LIMIT = 50
 
+CODEX_DIR = Path.home() / ".codex"
+CODEX_SESSIONS_DIR = CODEX_DIR / "sessions"
+CODEX_INDEX_FILE = CODEX_DIR / "session_index.jsonl"
+CODEX_TRANSCRIPT_LIMIT = 200
+
 # Records that aren't real conversation turns.
 SKIP_TYPES = {
     "attachment",
@@ -243,6 +248,81 @@ def scan_transcripts(limit=TRANSCRIPT_LIMIT):
                     results.append(meta)
             except Exception:
                 continue
+    results.sort(key=lambda r: r.get("last_ts") or "", reverse=True)
+    return results[:limit]
+
+
+# ──────────────────────────── codex transcript scanning ──────────────────────
+
+def _codex_thread_names():
+    """Return {session_id: thread_name} from ~/.codex/session_index.jsonl.
+    Empty dict if the file is missing or unreadable."""
+    names = {}
+    if not CODEX_INDEX_FILE.exists():
+        return names
+    try:
+        with open(CODEX_INDEX_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except Exception:
+                    continue
+                sid = d.get("id")
+                if sid and d.get("thread_name"):
+                    names[sid] = d["thread_name"]
+    except Exception:
+        pass
+    return names
+
+
+def _read_codex_session_meta(path):
+    """Read the first session_meta record's payload from a rollout file.
+    Returns the payload dict, or None if not found / unreadable."""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except Exception:
+                    continue
+                if d.get("type") == "session_meta":
+                    return d.get("payload") or {}
+                # session_meta is always the first record; stop early.
+                break
+    except Exception:
+        return None
+    return None
+
+
+def scan_codex_transcripts(limit=CODEX_TRANSCRIPT_LIMIT):
+    """List Codex sessions (most-recent first) by reading each rollout's
+    session_meta. Returns [] if ~/.codex/sessions is absent."""
+    if not CODEX_SESSIONS_DIR.exists():
+        return []
+    names = _codex_thread_names()
+    results = []
+    for jsonl in CODEX_SESSIONS_DIR.rglob("*.jsonl"):
+        if not jsonl.is_file():
+            continue
+        meta = _read_codex_session_meta(jsonl)
+        if not meta:
+            continue
+        sid = meta.get("id") or jsonl.stem
+        cwd = meta.get("cwd") or ""
+        results.append({
+            "session_id": sid,
+            "cwd": cwd,
+            "project_name": _project_name(cwd),
+            "last_ts": meta.get("timestamp") or "",
+            "thread_name": names.get(sid),
+            "originator": meta.get("originator") or "",
+        })
     results.sort(key=lambda r: r.get("last_ts") or "", reverse=True)
     return results[:limit]
 
@@ -717,6 +797,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         elif path == "/api/sessions2":
             self.send_json(scan_transcripts())
+
+        elif path == "/api/codex/sessions":
+            self.send_json(scan_codex_transcripts())
 
         elif path.startswith("/api/sessions2/search"):
             from urllib.parse import urlparse, parse_qs
