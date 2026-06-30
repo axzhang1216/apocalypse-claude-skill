@@ -490,6 +490,118 @@ def parse_conversation(path):
     return msgs
 
 
+def _find_codex_transcript(session_id):
+    """Locate a Codex rollout file by session id (UUID). Returns Path or None.
+    Rejects anything that looks like a path traversal attempt."""
+    if not CODEX_SESSIONS_DIR.exists():
+        return None
+    if "/" in session_id or "\\" in session_id or not session_id or session_id.startswith("."):
+        return None
+    matches = list(CODEX_SESSIONS_DIR.rglob(f"*{session_id}*.jsonl"))
+    return matches[0] if matches else None
+
+
+def parse_codex_conversation(path):
+    """Parse a Codex rollout JSONL into Claude-compatible messages.
+
+    Output schema matches parse_conversation(): {role, ts, text} for
+    user/assistant and {role:'tool', ts, tool_use_id, tool, input, output,
+    is_error} for tool calls. developer/reasoning records are skipped.
+    """
+    msgs = []
+    tool_idx_by_call_id = {}
+
+    try:
+        f = open(path, "r", encoding="utf-8", errors="replace")
+    except Exception:
+        return []
+
+    with f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                d = json.loads(line)
+            except Exception:
+                continue
+            if d.get("type") != "response_item":
+                continue
+            p = d.get("payload") or {}
+            ts = d.get("timestamp", "")
+            ptype = p.get("type", "")
+            role = p.get("role", "")
+
+            if ptype == "message":
+                if role not in ("user", "assistant"):
+                    continue  # skip developer / unknown roles
+                content = p.get("content") or []
+                if not isinstance(content, list):
+                    continue
+                texts = [c.get("text", "") for c in content
+                         if isinstance(c, dict) and c.get("text")]
+                if texts:
+                    joined = "\n".join(t for t in texts if t)
+                    if joined.strip():
+                        msgs.append({"role": role, "ts": ts, "text": joined})
+
+            elif ptype in ("function_call", "custom_tool_call"):
+                call_id = p.get("call_id") or ""
+                name = p.get("name") or ""
+                raw = p.get("arguments")
+                if raw is None:
+                    raw = p.get("input", "")
+                inp = raw
+                # Make shell commands readable: unwrap {"command": "..."}.
+                if isinstance(raw, str) and raw.lstrip().startswith("{"):
+                    try:
+                        parsed = json.loads(raw)
+                        if isinstance(parsed, dict):
+                            inp = parsed.get("command") or parsed.get("query") or raw
+                    except Exception:
+                        pass
+                if not isinstance(inp, str):
+                    try:
+                        inp = json.dumps(inp, ensure_ascii=False, indent=2)
+                    except Exception:
+                        inp = str(inp)
+                entry = {
+                    "role": "tool",
+                    "ts": ts,
+                    "tool_use_id": call_id,
+                    "tool": name,
+                    "input": inp,
+                    "output": None,
+                    "is_error": False,
+                }
+                msgs.append(entry)
+                if call_id:
+                    tool_idx_by_call_id[call_id] = len(msgs) - 1
+
+            elif ptype in ("function_call_output", "custom_tool_call_output"):
+                call_id = p.get("call_id") or ""
+                out = p.get("output", "")
+                if not isinstance(out, str):
+                    try:
+                        out = json.dumps(out, ensure_ascii=False)
+                    except Exception:
+                        out = str(out)
+                if call_id and call_id in tool_idx_by_call_id:
+                    msgs[tool_idx_by_call_id[call_id]]["output"] = out
+                else:
+                    msgs.append({
+                        "role": "tool",
+                        "ts": ts,
+                        "tool_use_id": call_id,
+                        "tool": "",
+                        "input": "",
+                        "output": out,
+                        "is_error": False,
+                    })
+
+    return msgs
+
+
 def delete_session_artifacts(session_id):
     """Remove snapshot files for session_id and filter events.jsonl. Leaves projects/ alone."""
     removed = {"snapshot_files": [], "events_dropped": 0}
@@ -800,6 +912,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         elif path == "/api/codex/sessions":
             self.send_json(scan_codex_transcripts())
+
+        elif path.startswith("/api/codex/sessions/"):
+            session_id = path[len("/api/codex/sessions/"):]
+            if "/" in session_id or "\\" in session_id or not session_id or session_id.startswith("."):
+                self.send_json({"error": "bad id"}, 400)
+                return
+            tpath = _find_codex_transcript(session_id)
+            if not tpath:
+                self.send_json({"error": "not found"}, 404)
+                return
+            self.send_json(parse_codex_conversation(tpath))
 
         elif path.startswith("/api/sessions2/search"):
             from urllib.parse import urlparse, parse_qs
