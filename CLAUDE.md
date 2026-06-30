@@ -46,6 +46,8 @@ The project has two directories:
    - `GET /api/sessions2/<id>` — parses a full transcript into user/assistant/tool messages
    - `GET /events/stream` — SSE endpoint; a background thread tails `events.jsonl` and pushes new lines to all connected clients
    - `DELETE /api/sessions2/<id>` — removes Apocalypse-managed artifacts (events + snapshots) without touching the original `~/.claude/projects/` transcripts
+   - `GET /api/codex/sessions` — scans `~/.codex/sessions/**/*.jsonl` (OpenAI Codex CLI rollouts), reads each file's `session_meta` for id/cwd/timestamp, enriches with `thread_name` from `~/.codex/session_index.jsonl`. Read-only, no hooks.
+   - `GET /api/codex/sessions/<id>` — parses a Codex rollout's `response_item` records into the same message schema as Claude (user/assistant/tool+output; developer/reasoning skipped; tool outputs linked by `call_id`)
 
 3. **`dashboard.html`** — single-file frontend with no CDN dependencies. Connects to the SSE stream for live updates.
 
@@ -84,6 +86,7 @@ Apocalypse runs on **Windows, macOS, and Linux**. All platform-specific behaviou
 | `STALE_SECONDS` | `server.py:21` | `86400` (1 day) |
 | `TRANSCRIPT_LIMIT` | `server.py:22` | 50 most recent sessions |
 | `SKIP_TYPES` | `server.py:24` | Record types filtered out during transcript parsing |
+| `CODEX_TRANSCRIPT_LIMIT` | `server.py` | 200 most recent Codex sessions |
 
 ## Workspace Visualization
 
@@ -118,6 +121,54 @@ The workspace visualization (`workspace.html`) features real astronomical nebula
 
 ### Layout Algorithm
 - **Golden Angle Spiral**: Even distribution using golden angle (~137.5°)
+- **Recency-ordered**: Sorted by `last_active` DESC; the most recent project sits
+  closest to origin. Distance formula adds a `0.06` floor so no nebula is pinned
+  at the rotation pivot (otherwise dragging the camera would spin an invisible point).
 - **Auto-scaling**: Spacing adjusts based on project count
 - **Collision Avoidance**: No overlap between projects
 - **Camera Adaptation**: Auto-adjusts distance based on layout bounds
+
+### Workspace gotchas (don't reintroduce these bugs)
+- **Hover-grow must skip hovered mesh in `animate()`**: Breathing/per-frame
+  scale writes overwrite `mesh.scale`, killing the `boostGlow` 1.4× hover
+  effect. Both the breathing loop and entry animation must check
+  `if (mesh === hoveredMesh) return;` before writing scale.
+- **Nebula size = session count, log2-scaled**: `0.33 + log2(1 + n) * 0.22`.
+  Don't reintroduce pure random sizing — it makes project importance invisible.
+- **Click vs drag**: `OrbitControls` must track `mousedown` start position and
+  set `_wasDrag` once cumulative movement > 5 px; `onClick` checks this flag
+  and bails. Without this, releasing the mouse after a rotation accidentally
+  enters a project.
+
+### History-export gotchas (don't reintroduce these bugs)
+- **`_roll_session_md` must hash-check before rolling**: Re-running `export`
+  with unchanged points must not churn `.old.N.md`. Hash the new content
+  and the existing main; if equal, return early. Without this, every export
+  with an oversized session md produces a duplicate-content `.old.1.md`.
+- **Never include `Exported: ...` timestamps in the rendered md**: They make
+  every render produce different bytes, defeating the hash dedup above. File
+  mtime is the export timestamp; no need to bake it into the body.
+- **Use `iterdir()` for file existence, not `Path.exists()`**: On Windows,
+  `Path.exists()` returns stale True for files that have just been renamed
+  (open-file handle caching). Use `parent.iterdir()` snapshots to detect
+  the true on-disk state before each rename.
+- **Write tmp files in binary mode**: `tmp.write_text(content)` triggers
+  CRLF normalization on Windows, adding `\r` to every newline and breaking
+  the hash check. Use `tmp.write_bytes(content.encode("utf-8"))`.
+- **Rolling filename pattern**: `base = main_path.stem`, sibling is
+  `f"{base}.old.{N}.md"` — so `foo.md` rolls into `foo.old.1.md`, NOT
+  `foo.md.old.1.md`. The export system uses the former.
+
+<!-- APOCALYPSE-HISTORY:START -->
+## Project History (Apocalypse)
+
+此项目过往的 Claude Code session 已自动归档到 `.apocalypse/`，按"讨论/决策"
+分章节组织（每 session 一个 md）。当用户问到本项目之前做过什么、决定过什么、
+讨论过什么时，**先读** `.apocalypse/*.md`（不带 `.old` 后缀的）再回答。
+
+- 主文件（活跃）= `.apocalypse/*.md`（无 `.old` 后缀）
+- 历史滚动文件 = `.apocalypse/*.old.*.md`（默认不读，必要时翻）
+- 目录说明 = `.apocalypse/README.md`
+
+**不要修改** `.apocalypse/` 下的文件——下次 `update workspace` 会被覆盖。
+<!-- APOCALYPSE-HISTORY:END -->
