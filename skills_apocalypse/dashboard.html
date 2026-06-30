@@ -359,7 +359,7 @@ function buildExportText(msgs) {
       }
       return lines.join('\n');
     }
-    const label = role === 'user' ? 'User' : (role === 'assistant' ? 'Claude' : role);
+    const label = role === 'user' ? 'User' : (role === 'assistant' ? agentLabel() : role);
     return head + label + '\n' + (m.text || '');
   }).join('\n\n') + '\n';
 }
@@ -418,7 +418,7 @@ function msgHTML(m) {
       </div>`;
   }
   const labelClass = role === 'user' ? 'user-label' : (role === 'assistant' ? 'assistant-label' : '');
-  const label = role === 'user' ? 'User' : (role === 'assistant' ? 'Claude' : role);
+  const label = role === 'user' ? 'User' : (role === 'assistant' ? agentLabel() : role);
   return `
     <div class="msg ${escapeHTML(role)}">
       <div class="role-label ${labelClass}">${escapeHTML(label)}</div>
@@ -431,7 +431,7 @@ async function selectSession(id) {
   selectedId = id;
   renderSessionList();
   const s = sessions.find(x => x.session_id === id);
-  document.getElementById('detail-title').textContent = (s && s.project_name) || id;
+  document.getElementById('detail-title').textContent = (s && (s.thread_name || s.project_name)) || id;
   document.getElementById('detail-meta').textContent = (s && s.cwd) || '';
   const exportBtn = document.getElementById('export-btn');
   exportBtn.style.display = 'none';
@@ -439,7 +439,7 @@ async function selectSession(id) {
   const conv = document.getElementById('conversation');
   conv.innerHTML = '<div id="empty">Loading…</div>';
   try {
-    const r = await fetch('/api/sessions2/' + encodeURIComponent(id));
+    const r = await fetch((currentTab === 'codex' ? '/api/codex/sessions/' : '/api/sessions2/') + encodeURIComponent(id));
     if (!r.ok) { conv.innerHTML = '<div id="empty">Failed to load conversation.</div>'; return; }
     const msgs = await r.json();
     currentMsgs = msgs;
