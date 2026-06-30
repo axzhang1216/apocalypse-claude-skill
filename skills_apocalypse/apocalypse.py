@@ -685,29 +685,73 @@ def get_provider(mode):
     }
 
 
+def _choose_permission_mode(provider, action_label):
+    items = [
+        {
+            "label": "Standard permissions",
+            "sub": f"Launch {provider['agent_label']} with its normal approval and sandbox flow",
+            "value": "standard",
+            "color": GREEN,
+        },
+        {
+            "label": "All permissions",
+            "sub": f"Launch {provider['agent_label']} in dangerous full-access mode",
+            "value": "dangerous",
+            "color": RED,
+        },
+    ]
+    menu = Menu(
+        f"Apocalypse | {provider['agent_label']} Permissions",
+        items,
+        footer=f"Choose launch mode for {action_label}  |  q back",
+    )
+    selected = menu.run()
+    if not selected:
+        return None
+    return selected["value"]
+
+
+def _build_launch_command(provider_name, cli_path, session_id=None, dangerous=False):
+    if provider_name == "codex":
+        parts = [f'"{cli_path}"']
+        if session_id:
+            parts.extend(["resume", session_id])
+        if dangerous:
+            parts.append("--dangerously-bypass-approvals-and-sandbox")
+        return " ".join(parts)
+
+    parts = [f'"{cli_path}"']
+    if session_id:
+        parts.extend(["--resume", session_id])
+    if dangerous:
+        parts.append("--dangerously-skip-permissions")
+    return " ".join(parts)
+
+
 def launch_session(session):
     sid = session["id"]
     cwd = session.get("cwd", "") or _find_cwd_for_session(sid)
-    provider_name = session.get("provider", "claude")
-    cli_path = shutil.which(provider_name) or provider_name
-    if provider_name == "codex":
-        cmd = f'"{cli_path}" resume {sid}'
-    else:
-        cmd = f'"{cli_path}" --resume {sid} --dangerously-skip-permissions'
+    provider = get_provider(session.get("provider", "claude"))
+    mode = _choose_permission_mode(provider, "session resume")
+    if mode is None:
+        return False
+    cli_path = shutil.which(provider["name"]) or provider["name"]
+    cmd = _build_launch_command(provider["name"], cli_path, session_id=sid, dangerous=(mode == "dangerous"))
     print(f"\n  {DIM}Launch: cd {cwd} && {cmd}{RESET}")
     launch_in_terminal(cmd, cwd=cwd or None)
+    return True
 
 
 def launch_new_conversation(project, provider):
     cwd = project.get("cwd", "")
-    provider_name = provider["name"]
-    cli_path = shutil.which(provider_name) or provider_name
-    if provider_name == "codex":
-        cmd = f'"{cli_path}"'
-    else:
-        cmd = f'"{cli_path}" --dangerously-skip-permissions'
+    mode = _choose_permission_mode(provider, "new session")
+    if mode is None:
+        return False
+    cli_path = shutil.which(provider["name"]) or provider["name"]
+    cmd = _build_launch_command(provider["name"], cli_path, dangerous=(mode == "dangerous"))
     print(f"\n  {DIM}Launch new session: cd {cwd} && {cmd}{RESET}")
     launch_in_terminal(cmd, cwd=cwd or None)
+    return True
 
 
 def recent_sessions_menu(provider):
@@ -754,13 +798,15 @@ def recent_sessions_menu(provider):
             session = project_select_flow(provider)
             if session is None:
                 return
-            launch_session(session)
-            return
+            if launch_session(session):
+                return
+            continue
 
         action = show_detail(selected["session"], provider)
         if action == "resume":
-            launch_session(selected["session"])
-            return
+            if launch_session(selected["session"]):
+                return
+            continue
         if action is None:
             return
 
@@ -842,8 +888,9 @@ def session_select_flow(provider, project):
         if not selected:
             return None
         if selected.get("_new_conversation"):
-            launch_new_conversation(project, provider)
-            return None
+            if launch_new_conversation(project, provider):
+                return None
+            continue
         action = show_detail(selected["session"], provider)
         if action == "resume":
             return selected["session"]
