@@ -71,6 +71,13 @@
   .copy-toast { position: fixed; bottom: 20px; right: 20px; background: var(--bg3); border: 1px solid var(--green); color: var(--green); padding: 8px 14px; border-radius: 6px; font-size: 13px; opacity: 0; transition: opacity 0.2s; pointer-events: none; z-index: 1000; }
   .copy-toast.show { opacity: 1; }
 
+  /* ── Tab bar ── */
+  .tab-bar { display: flex; gap: 4px; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+  .tab { flex: 1; background: transparent; border: 1px solid var(--border); color: var(--muted); padding: 5px 10px; border-radius: 4px; cursor: pointer; font-family: inherit; font-size: 12px; }
+  .tab:hover { color: var(--text); background: var(--bg3); }
+  .tab.active { color: var(--text); background: var(--bg3); border-color: var(--blue); }
+  .codex-badge { font-size: 9px; letter-spacing: 0.05em; color: var(--blue); border: 1px solid var(--border); border-radius: 3px; padding: 2px 4px; flex-shrink: 0; margin-top: 2px; text-transform: uppercase; }
+
   /* ── Activity heatmap ── */
   #heatmap-section { padding: 8px 12px; border-bottom: 1px solid var(--border); }
   #heatmap-section h3 { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 6px; display: flex; justify-content: space-between; align-items: center; }
@@ -134,6 +141,10 @@
 
 <div class="layout">
   <div id="session-pane">
+    <div class="tab-bar">
+      <button class="tab active" data-tab="claude" onclick="switchTab('claude')">Claude</button>
+      <button class="tab" data-tab="codex" onclick="switchTab('codex')">Codex</button>
+    </div>
     <div id="heatmap-section">
       <h3>Vib Coding 活跃度 <span id="heatmap-total"></span></h3>
       <div id="heatmap-grid"></div>
@@ -186,6 +197,24 @@ let selectedId = null;
 let currentMsgs = [];
 let evtSource = null;
 let reconnectTimer = null;
+let currentTab = "claude";
+
+function agentLabel() {
+  return currentTab === "codex" ? "Codex" : "Claude";
+}
+
+function switchTab(tab) {
+  if (tab === currentTab) return;
+  currentTab = tab;
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
+  const isCodex = tab === "codex";
+  document.getElementById('heatmap-section').style.display = isCodex ? 'none' : '';
+  document.getElementById('search-box').style.display = isCodex ? 'none' : '';
+  if (typeof clearSearch === 'function') clearSearch();
+  selectedId = null;
+  clearDetail();
+  refreshSessions();
+}
 
 function escapeHTML(s) {
   return String(s == null ? '' : s)
@@ -234,27 +263,38 @@ async function copyText(text, label) {
 function renderSessionList() {
   const el = document.getElementById('session-list');
   document.getElementById('session-count').textContent = sessions.length ? '(' + sessions.length + ')' : '';
+  const isCodex = currentTab === "codex";
   if (!sessions.length) {
-    el.innerHTML = '<div style="color: var(--muted); padding: 16px;">No sessions found in ~/.claude/projects/</div>';
+    el.innerHTML = isCodex
+      ? '<div style="color: var(--muted); padding: 16px;">No Codex sessions found in ~/.codex/sessions/</div>'
+      : '<div style="color: var(--muted); padding: 16px;">No sessions found in ~/.claude/projects/</div>';
     return;
   }
   el.innerHTML = sessions.map(s => {
     const short = (s.session_id || '').slice(0, 8);
+    const title = isCodex ? (s.thread_name || s.project_name || 'unknown') : (s.project_name || 'unknown');
+    const leftCol = isCodex
+      ? `<div class="codex-badge">Codex</div>`
+      : `<div class="dot ${escapeHTML(s.status)}"></div>`;
+    const metaActions = isCodex
+      ? `<span>${escapeHTML(timeAgo(s.last_ts))}</span>`
+      : `<span class="id-chip" title="${escapeHTML(s.session_id)}">${escapeHTML(short)}</span>
+         <button class="icon-btn" data-act="copy" data-id="${escapeHTML(s.session_id)}" title="Copy resume id (claude --resume ${escapeHTML(s.session_id)})">⧉</button>
+         <span>${escapeHTML(timeAgo(s.last_ts))}</span>`;
+    const actionsCol = isCodex
+      ? ''
+      : `<div class="actions">
+           <button class="icon-btn danger" data-act="delete" data-id="${escapeHTML(s.session_id)}" title="Delete dashboard record (does NOT touch the original transcript)">🗑</button>
+         </div>`;
     return `
       <div class="session-row ${selectedId === s.session_id ? 'active' : ''}" data-id="${escapeHTML(s.session_id)}">
-        <div class="dot ${escapeHTML(s.status)}"></div>
+        ${leftCol}
         <div class="body">
-          <div class="title">${escapeHTML(s.project_name || 'unknown')}</div>
-          <div class="meta">
-            <span class="id-chip" title="${escapeHTML(s.session_id)}">${escapeHTML(short)}</span>
-            <button class="icon-btn" data-act="copy" data-id="${escapeHTML(s.session_id)}" title="Copy resume id (claude --resume ${escapeHTML(s.session_id)})">⧉</button>
-            <span>${escapeHTML(timeAgo(s.last_ts))}</span>
-          </div>
+          <div class="title">${escapeHTML(title)}</div>
+          <div class="meta">${metaActions}</div>
           <div class="meta" style="margin-top: 2px; opacity: 0.7;">${escapeHTML(s.cwd || '')}</div>
         </div>
-        <div class="actions">
-          <button class="icon-btn danger" data-act="delete" data-id="${escapeHTML(s.session_id)}" title="Delete dashboard record (does NOT touch the original transcript)">🗑</button>
-        </div>
+        ${actionsCol}
       </div>`;
   }).join('');
 
@@ -604,7 +644,8 @@ function escapeHTML(s) {
 
 async function refreshSessions() {
   try {
-    const r = await fetch('/api/sessions2');
+    const url = currentTab === "codex" ? '/api/codex/sessions' : '/api/sessions2';
+    const r = await fetch(url);
     sessions = await r.json();
     renderSessionList();
   } catch (_) {}
@@ -614,6 +655,7 @@ function connectSSE() {
   if (evtSource) evtSource.close();
   evtSource = new EventSource('/events/stream');
   evtSource.onmessage = () => {
+    if (currentTab !== 'claude') return;
     refreshSessions().then(() => {
       if (selectedId) {
         const stillThere = sessions.find(s => s.session_id === selectedId);
@@ -636,7 +678,7 @@ refreshSessions().then(() => {
   connectSSE();
 });
 
-setInterval(refreshSessions, 30000);
+setInterval(() => { if (currentTab === 'claude') refreshSessions(); }, 30000);
 </script>
 </body>
 </html>
