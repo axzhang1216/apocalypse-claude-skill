@@ -51,13 +51,14 @@ class TestPagerScroll(unittest.TestCase):
             state_history.append((k, s.top))
             if k == "j":
                 return PagerState(s.lines, top=min(s.top + 1, len(s.lines) - 1))
-            return s  # stay alive
+            return s  # not handled — but "q" is intercepted before on_key
 
         pager = Pager(["a", "b", "c"], in_stream=keys, out_stream=out,
                       height_fn=lambda: 24, on_key=on_key)
         pager.run()
-        # Two keys: 'j' (top=1), 'q' (top=1, no change)
-        self.assertEqual(state_history, [("j", 0), ("q", 1)])
+        # "j" reaches on_key and moves top to 1; "q" is intercepted by the
+        # Pager's default quit handling and never reaches on_key.
+        self.assertEqual(state_history, [("j", 0)])
 
     def test_g_goto_top(self):
         out = io.StringIO()
@@ -70,7 +71,7 @@ class TestPagerScroll(unittest.TestCase):
                 return PagerState(s.lines, top=0)
             return s
 
-        pager = Pager(list(range(50)), in_stream=keys, out_stream=out,
+        pager = Pager([str(i) for i in range(50)], in_stream=keys, out_stream=out,
                       height_fn=lambda: 10, on_key=on_key)
         pager.run()
 
