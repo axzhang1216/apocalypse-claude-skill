@@ -1150,8 +1150,15 @@ def update_workspace():
 
 def run(args=None):
     if args is None:
+        # Compatibility shim: build a minimal args namespace from argv so
+        # this module can still be invoked directly (e.g. `python launcher.py
+        # --list`).
         import argparse
-        parser = _build_argparser()
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--codex", action="store_true")
+        parser.add_argument("--list", action="store_true")
+        parser.add_argument("--update", action="store_true")
+        parser.add_argument("--refresh", action="store_true")
         args = parser.parse_args()
 
     provider = get_provider("codex" if args.codex else "claude")
@@ -1182,35 +1189,6 @@ def run(args=None):
         run_incremental()
 
     recent_sessions_menu(provider)
-
-
-def _build_argparser():
-    parser = argparse.ArgumentParser(description="Apocalypse Launcher")
-    parser.add_argument("--refresh", action="store_true")
-    parser.add_argument(
-        "--update",
-        action="store_true",
-        help="Update workspace: analyze new sessions, assign themes, show summary",
-    )
-    parser.add_argument("--list", action="store_true")
-    parser.add_argument(
-        "--codex",
-        action="store_true",
-        help="Launch the Codex CLI history browser instead of Claude",
-    )
-    return parser
-
-
-def _dispatch(args):
-    if args.subcommand == "log":
-        from apocalypse import log_view
-        log_view.main(args)
-    elif args.subcommand == "workspace":
-        from apocalypse import workspace_view
-        workspace_view.main(args)
-    else:
-        print(f"Unknown subcommand: {args.subcommand}", file=sys.stderr)
-        sys.exit(1)
 
 
 def is_headless() -> bool:
