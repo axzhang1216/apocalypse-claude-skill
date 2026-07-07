@@ -279,6 +279,8 @@ class Pager:
                 while True:
                     self._render()
                     key = keys.read_key()
+                    if key in ("q", "ESC"):
+                        return
                     if self._on_key is not None:
                         new_state = self._on_key(key, self.state)
                         if new_state is None:
