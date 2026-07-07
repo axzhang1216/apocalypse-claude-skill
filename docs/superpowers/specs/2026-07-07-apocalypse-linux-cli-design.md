@@ -133,7 +133,24 @@ class Style:
     # ... green, yellow, blue, magenta, cyan
 ```
 
-UTF-8 block characters (▁▂▃▄▅▆▇█) for bar charts and visual symbols (▣ ⚙ ▶ ⏎ ↩ ▸ »). When `Style.enabled` is False, fall back to ASCII (`-` and `*`).
+Visual characters. When `Style.enabled` is False, every glyph falls back to ASCII so the output stays terminal-portable:
+
+| Glyph | ASCII fallback | Used for |
+|---|---|---|
+| `▁▂▃▄▅▆▇█` | `--------` (same length) | bar charts |
+| `▣` | `*` | project marker |
+| `⚙` | `#` | tool_use |
+| `📖` | `R` | Read tool |
+| `▶` | `>` | action |
+| `⏎` | `@` | enter |
+| `↩` | `<` | back |
+| `▸` | `*` | point/discussion |
+| `»` | `>>` | filter match |
+| `✅` | `+` | tool ok |
+| `❌` | `x` | tool error |
+| `→` | `->` | arrow |
+
+Colour is independently suppressed (no `\033[…m` sequences emitted).
 
 ### Terminal size
 
@@ -390,7 +407,7 @@ q                  quit workspace
 | TTY not interactive + `apocalypse log` (no `--raw`) | auto-fall-back to `--raw` mode with stderr notice |
 | Terminal < 60 cols or < 10 rows | one-line stderr warning, render at actual size (don't crash) |
 | `Ctrl+C` in pager | catch SIGINT, restore termios, exit 130 |
-| `NO_COLOR=1` or `TERM=dumb` | Style.enabled = False; bars become `...`; symbols become ASCII |
+| `NO_COLOR=1` or `TERM=dumb` | Style.enabled = False; bars and symbols become ASCII (see `tui.py` table); colour sequences suppressed |
 | `SSH_CONNECTION` set + no DISPLAY | headless mode active; resume prints command only |
 | Both Claude and Codex data sources empty | exit 1 + stderr "No apocalypse data found. Run `apocalypse --update` or launch a Claude/Codex session first." |
 | `apocalypse workspace` with no projects in workspace.json | exit 1 + same "run --update" hint |
