@@ -1,13 +1,25 @@
-"""Entry point. argparse dispatch and headless detection.
-
-This file starts as a stub; the real argparse + launcher delegation
-arrives in Task 2.
-"""
+#!/usr/bin/env python3
+"""Entry point. argparse dispatch and headless detection."""
 import sys
+import os
+
+# Add the parent directory to path so we can import the launcher
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from apocalypse.launcher import run, _build_argparser, _dispatch, is_headless
 
 
 def main() -> int:
-    print("apocalypse: package skeleton (no menu yet — see Task 2)", file=sys.stderr)
+    parser = _build_argparser()
+    parser.add_argument("subcommand", nargs="?", help="Subcommand to run (log, workspace)")
+    args, remaining = parser.parse_known_args()
+
+    # Pass remaining args to subcommand
+    if args.subcommand:
+        sys.argv = [sys.argv[0], args.subcommand] + remaining
+        _dispatch(args)
+    else:
+        run(args)
     return 0
 
 
