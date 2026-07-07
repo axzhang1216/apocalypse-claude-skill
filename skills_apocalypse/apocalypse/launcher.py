@@ -10,6 +10,7 @@ Usage:
 import argparse
 import io
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -728,6 +729,23 @@ def _build_launch_command(provider_name, cli_path, session_id=None, dangerous=Fa
     return " ".join(parts)
 
 
+def _print_resume_command(cwd: str, cmd: str) -> bool:
+    """Print the resume command for the user to copy-paste in another shell.
+
+    Used on headless systems where we cannot spawn a GUI terminal.
+    """
+    full = f"cd {cwd} && {cmd}" if cwd else cmd
+    print()
+    print("  [headless mode] Resume command (paste in your other shell):")
+    print(f"    {full}")
+    print()
+    try:
+        input("  Press Enter to return to the menu...")
+    except (EOFError, KeyboardInterrupt):
+        pass
+    return True
+
+
 def launch_session(session):
     sid = session["id"]
     cwd = session.get("cwd", "") or _find_cwd_for_session(sid)
@@ -737,6 +755,8 @@ def launch_session(session):
         return False
     cli_path = shutil.which(provider["name"]) or provider["name"]
     cmd = _build_launch_command(provider["name"], cli_path, session_id=sid, dangerous=(mode == "dangerous"))
+    if is_headless():
+        return _print_resume_command(cwd, cmd)
     print(f"\n  {DIM}Launch: cd {cwd} && {cmd}{RESET}")
     launch_in_terminal(cmd, cwd=cwd or None)
     return True
@@ -749,6 +769,8 @@ def launch_new_conversation(project, provider):
         return False
     cli_path = shutil.which(provider["name"]) or provider["name"]
     cmd = _build_launch_command(provider["name"], cli_path, dangerous=(mode == "dangerous"))
+    if is_headless():
+        return _print_resume_command(cwd, cmd)
     print(f"\n  {DIM}Launch new session: cd {cwd} && {cmd}{RESET}")
     launch_in_terminal(cmd, cwd=cwd or None)
     return True
@@ -788,7 +810,8 @@ def recent_sessions_menu(provider):
         menu = Menu(
             f"Apocalypse | Recent {provider['agent_label']} Sessions",
             items,
-            footer="Up/Down navigate  |  Enter detail  |  q quit",
+            footer=("Up/Down navigate  |  Enter detail  |  q quit"
+                    + ("  |  [headless] resume prints command" if is_headless() else "")),
         )
         selected = menu.run()
         if not selected:
@@ -831,7 +854,8 @@ def project_select_flow(provider):
         menu = Menu(
             f"Apocalypse | Choose {provider['agent_label']} Project",
             items,
-            footer="Up/Down navigate  |  Enter select  |  q back",
+            footer=("Up/Down navigate  |  Enter select  |  q back"
+                    + ("  |  [headless] resume prints command" if is_headless() else "")),
         )
         selected = menu.run()
         if not selected:
@@ -882,7 +906,8 @@ def session_select_flow(provider, project):
         menu = Menu(
             f"Apocalypse | {provider['agent_label']} / {project['title']}",
             items,
-            footer="Up/Down navigate  |  Enter detail  |  q back",
+            footer=("Up/Down navigate  |  Enter detail  |  q back"
+                    + ("  |  [headless] resume prints command" if is_headless() else "")),
         )
         selected = menu.run()
         if not selected:
@@ -1188,6 +1213,15 @@ def _dispatch(args):
         sys.exit(1)
 
 
-def is_headless():
-    """Stub implementation - real implementation in Task 6"""
+def is_headless() -> bool:
+    """True when there's no usable GUI terminal launcher available.
+
+    Triggers:
+      - SSH_CONNECTION or SSH_TTY is set (terminal is on the remote side)
+      - No DISPLAY and no WAYLAND_DISPLAY (no X / Wayland server)
+    """
+    if os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_TTY"):
+        return True
+    if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        return True
     return False
