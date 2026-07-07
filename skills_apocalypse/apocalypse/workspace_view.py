@@ -209,8 +209,11 @@ class WorkspaceView:
         sys.stdout.write(self.style.dim("Enter enter  ←/h back  q quit  / filter  ? help") + "\n")
         sys.stdout.flush()
 
-    def run(self) -> int:
+    def run(self, search: Optional[str] = None) -> int:
         from apocalypse.tui import RawInput
+        if search:
+            # Future: pre-fill filter. For now, just print a notice.
+            print(f"[apocalypse workspace] filter pre-fill not yet implemented: {search!r}", file=sys.stderr)
         try:
             with RawInput() as keys:
                 while True:
@@ -272,7 +275,5 @@ def run(*, search: Optional[str] = None, codex: bool = False) -> int:
         )
         return 1
     view = WorkspaceView(workspace, provider=provider)
-    if search:
-        # Future: pre-fill filter. For now, just print a notice.
-        print(f"[apocalypse workspace] filter pre-fill not yet implemented: {search!r}", file=sys.stderr)
-    return view.run()
+    return view.run(search=search)
+
