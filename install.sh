@@ -60,11 +60,13 @@ for vendor in three.module.min.js OrbitControls.js; do
   fi
 done
 
-# Texture assets for workspace visual effects
-for tex in mesh1.png mesh2.png mesh3.png; do
-  if [ -f "$REPO_DIR/$tex" ]; then
-    cp "$REPO_DIR/$tex" "$DEST/$tex"
-  fi
+# Texture assets for workspace visual effects.
+# workspace.html references mesh1/mesh3 plus several nebula_mesh_nebula*.png
+# files; server.py serves any /nebula_*.png from the skill dir. Copy all
+# textures present in the repo so the workspace starfield renders fully.
+for tex in "$REPO_DIR"/*.png "$REPO_DIR"/*.jpg; do
+  [ -f "$tex" ] || continue
+  cp "$tex" "$DEST/$(basename "$tex")"
 done
 
 chmod +x "$DEST/start.sh" "$DEST/hooks/on-tool.sh" "$DEST/hooks/on-stop.sh"

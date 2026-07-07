@@ -332,8 +332,11 @@ def load_workspace() -> dict:
     if WORKSPACE_FILE.exists():
         try:
             return json.loads(WORKSPACE_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            pass
+        except Exception as e:
+            # Don't silently fall back to an empty workspace — that would
+            # make all projects vanish with no clue why. Warn so the user
+            # can investigate or restore from backup.
+            print(f"WARNING: workspace.json parse failed ({e}); starting fresh", file=sys.stderr)
     return {"version": 1, "last_full_init": "", "projects": {}, "analyzed_session_ids": []}
 
 
@@ -516,7 +519,12 @@ def set_themes():
       }
     }
     """
-    data = json.loads(sys.stdin.read())
+    # Read raw bytes and decode as UTF-8 explicitly. On Windows, Python's
+    # default stdin encoding is the OEM codepage (e.g. cp936); feeding a
+    # UTF-8 JSON payload through `sys.stdin.read()` decodes bytes as cp936
+    # and produces lone surrogates, which then crash save_workspace's
+    # utf-8 write. Reading bytes sidesteps the stdio codec entirely.
+    data = json.loads(sys.stdin.buffer.read().decode("utf-8"))
     ws = load_workspace()
     count = 0
     projects_map = data.get("projects", {})

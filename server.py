@@ -49,7 +49,9 @@ _sse_lock = threading.Lock()
 def tail_events(last_pos=0):
     if not EVENTS_FILE.exists():
         return [], last_pos
-    with open(EVENTS_FILE, "r", encoding="utf-8") as f:
+    # errors="replace": a corrupted byte should not crash the whole broadcast
+    # loop. Bad lines become U+FFFD and are filtered downstream.
+    with open(EVENTS_FILE, "r", encoding="utf-8", errors="replace") as f:
         f.seek(last_pos)
         new = f.readlines()
         new_pos = f.tell()
@@ -76,7 +78,10 @@ def broadcast_thread():
 def read_events(n=500):
     if not EVENTS_FILE.exists():
         return []
-    with open(EVENTS_FILE, "r", encoding="utf-8") as f:
+    # errors="replace": if a single byte in events.jsonl is corrupted (e.g. a
+    # truncated write produced invalid UTF-8), skip that line instead of
+    # raising UnicodeDecodeError and taking down the /api/events endpoint.
+    with open(EVENTS_FILE, "r", encoding="utf-8", errors="replace") as f:
         lines = f.readlines()
     events = []
     for line in lines[-n:]:
@@ -86,7 +91,7 @@ def read_events(n=500):
         try:
             events.append(json.loads(line))
         except Exception:
-            pass
+            continue
     return events
 
 
