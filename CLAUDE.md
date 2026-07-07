@@ -32,10 +32,21 @@ This copies files to `~/.claude/skills/apocalypse/` and registers hooks in `~/.c
 
 ## Architecture
 
-The project has two directories:
+The project has two directories plus a CLI package:
 
 - **`skills_apocalypse/`** — source files, committed to git
 - **`runtime_apocalypse/`** — runtime data (events, session snapshots, PID file); not committed
+- **`skills_apocalypse/apocalypse/`** — Python package with the new CLI subcommands
+  - `__main__.py` — argparse dispatch and headless detection
+  - `launcher.py` — existing menu code (moved from the top-level `apocalypse.py`)
+  - `log_view.py` — `apocalypse log` subcommand (transcript pager)
+  - `workspace_view.py` — `apocalypse workspace` subcommand (3-level project tree)
+  - `tui.py` — shared TUI primitives (Style colour/glyph wrapper, Pager, RawInput)
+
+The top-level `skills_apocalypse/apocalypse.py` is a 5-line wrapper
+that calls into the package. Backward compatibility is preserved: all
+existing flags (`--refresh`, `--update`, `--list`, `--codex`) and the
+menu behaviour are unchanged.
 
 ### Data flow
 
@@ -65,6 +76,28 @@ Hooks pass the Claude Code JSON payload via the `APOCALYPSE_INPUT` env var (not 
 ### Windows / Git Bash notes
 
 `start.sh` probes for `python3` vs `python` because Windows has a broken `python3` stub in the WindowsApps PATH. The same probe pattern is in both hook scripts.
+
+## CLI Subcommands
+
+`apocalypse` accepts a subcommand:
+
+| Subcommand | What it does |
+|---|---|
+| `apocalypse` (no args) | Original menu (unchanged) |
+| `apocalypse log <sid>` | Interactive pager for a full session transcript |
+| `apocalypse log <sid> --raw` | ANSI text, no pager (pipe to `less -R`) |
+| `apocalypse log <sid> --tail` | Watch the session live |
+| `apocalypse workspace` | Multi-level project tree (top → project → points) |
+
+See `SKILL.md` → "CLI Subcommands" for full keymaps and headless mode notes.
+
+## Headless mode
+
+SSH / no-GUI environments are detected via `SSH_CONNECTION` / `SSH_TTY` / `DISPLAY` / `WAYLAND_DISPLAY` (see `apocalypse/launcher.is_headless`). In headless mode:
+
+- `apocalypse` (menu) shows a `[headless]` hint in the footer.
+- The "resume" action prints the `cd <cwd> && claude --resume <sid>` line for the user to paste in another shell, instead of trying to launch a GUI terminal.
+- `apocalypse log` and `apocalypse workspace` work unchanged (they are pure TUI / stdout output).
 
 ## Cross-platform support
 

@@ -220,6 +220,65 @@ For quick silent refresh (no UI):
 apocalypse --refresh    # runs incremental analysis only, no summary
 ```
 
+## CLI Subcommands
+
+`apocalypse` accepts a subcommand. With no subcommand, the original
+menu-driven launcher runs (unchanged). New subcommands target SSH and
+headless Linux users who can't open a browser.
+
+| Subcommand | Behaviour |
+|---|---|
+| `apocalypse` | Original menu (recent sessions → detail → resume) |
+| `apocalypse log <sid>` | Interactive pager for a full session transcript |
+| `apocalypse log <sid> --raw` | ANSI-coloured transcript, no pager (for `less -R`) |
+| `apocalypse log <sid> --tail` | Watch the session live |
+| `apocalypse workspace` | Multi-level project tree (top → project → points) |
+| `apocalypse --codex` | Switch to OpenAI Codex source (works with all subcommands) |
+
+### `apocalypse log` keymap
+
+```
+j / ↓            next line
+k / ↑            prev line
+d / u            half-page down / up
+PgDn / Space     next page
+PgUp / b         prev page
+g / G            top / bottom
+/ text           search forward
+? text           search backward
+n / N            next / prev match
+t                toggle tool expansion
+q / Esc          quit
+```
+
+### `apocalypse workspace` keymap
+
+```
+↑/k ↓/j          up / down
+Enter / →/l      enter current row
+← / h            previous level
+g / G            top / bottom
+/                enter filter mode
+Esc (top level)  quit
+q                quit
+```
+
+### Headless mode (SSH / no GUI)
+
+On SSH sessions or systems with no `DISPLAY` / `WAYLAND_DISPLAY`, the
+menu enters headless mode. Resume actions print the launch command
+instead of opening a new terminal:
+
+```
+  [headless mode] Resume command (paste in your other shell):
+    cd <cwd> && claude --resume <sid>
+
+  Press Enter to return to the menu...
+```
+
+This is auto-detected from `SSH_CONNECTION` / `SSH_TTY` env vars or the
+absence of a display server.
+
 ## History export
 
 Each project's discussion-decision slices (from `extract-points`) are exported as
