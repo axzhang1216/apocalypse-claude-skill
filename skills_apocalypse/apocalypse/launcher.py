@@ -26,6 +26,7 @@ from codex_workspace import (  # noqa: E402
     update_codex_workspace,
 )
 from platform_utils import launch_in_terminal  # noqa: E402
+from platform_utils import get_platform  # noqa: E402
 
 if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
@@ -1287,10 +1288,16 @@ def is_headless() -> bool:
 
     Triggers:
       - SSH_CONNECTION or SSH_TTY is set (terminal is on the remote side)
-      - No DISPLAY and no WAYLAND_DISPLAY (no X / Wayland server)
+      - Linux without DISPLAY and without WAYLAND_DISPLAY (no X / Wayland server)
+
+    Windows and macOS are never headless based on GUI vars alone — they
+    have native terminal launchers (wt / cmd on Windows, Terminal.app on
+    macOS) wired up in platform_utils.launch_in_terminal.
     """
     if os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_TTY"):
         return True
+    if get_platform() in ("windows", "macos"):
+        return False
     if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
         return True
     return False
