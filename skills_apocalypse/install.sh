@@ -43,6 +43,15 @@ cp "$REPO_DIR/workspace_init.py"      "$DEST/workspace_init.py"
 cp "$REPO_DIR/apocalypse.py"          "$DEST/apocalypse.py"
 cp "$REPO_DIR/codex_workspace.py"     "$DEST/codex_workspace.py"
 cp "$REPO_DIR/platform_utils.py"      "$DEST/platform_utils.py"
+
+# The apocalypse/ Python package (CLI subcommands + launcher). apocalypse.py is
+# now a thin wrapper that imports from this package, so it must be deployed
+# alongside the wrapper or `apocalypse` breaks at import time.
+if [ -d "$REPO_DIR/apocalypse" ]; then
+    rm -rf "$DEST/apocalypse/__pycache__"
+    mkdir -p "$DEST/apocalypse"
+    cp "$REPO_DIR"/apocalypse/*.py "$DEST/apocalypse/"
+fi
 cp "$REPO_DIR/apocalypse.sh"          "$DEST/apocalypse.sh"
 chmod +x "$DEST/apocalypse.sh"
 

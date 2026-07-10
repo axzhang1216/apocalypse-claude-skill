@@ -207,6 +207,97 @@ def _load_workspace():
         return None
 
 
+def _save_workspace(ws):
+    WORKSPACE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = WORKSPACE.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(ws, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, WORKSPACE)
+
+
+def _workspace_has_projects(ws):
+    for project in (ws.get("projects") or {}).values():
+        if project.get("analyzed_sessions"):
+            return True
+    return False
+
+
+def _build_lightweight_projects(ws):
+    """Populate ws['projects'] from transcript metadata only (no LLM).
+
+    Used when workspace.json is missing or empty so the menus still work.
+    Mirrors workspace_init.scan_projects' key scheme (key = cwd or dir name).
+    Leaves ws['analyzed_session_ids'] empty on purpose: a subsequent
+    `apocalypse --update` still sees every session as un-analyzed and
+    overwrites these placeholder entries with real Haiku summaries.
+    """
+    ws.setdefault("projects", {})
+    ws.setdefault("analyzed_session_ids", [])
+    if not PROJECTS_DIR.exists():
+        return
+    for proj_dir in PROJECTS_DIR.iterdir():
+        if not proj_dir.is_dir():
+            continue
+        for jsonl in proj_dir.glob("*.jsonl"):
+            try:
+                meta = _analyze_transcript(jsonl)
+            except Exception:
+                continue
+            if not meta:
+                continue
+            key = meta.get("cwd") or proj_dir.name
+            name = meta.get("project_name") or proj_dir.name
+            ts = meta.get("last_ts", "")
+            proj = ws["projects"].get(key)
+            if proj is None:
+                proj = {
+                    "name": name,
+                    "cwd": meta.get("cwd", ""),
+                    "title": "",  # auto-theme / `--update` fills a label later
+                    "tags": [],
+                    "sessions": [],
+                    "analyzed_sessions": {},
+                    "first_seen": ts,
+                    "last_active": ts,
+                }
+                ws["projects"][key] = proj
+            sid = meta["session_id"]
+            if sid not in proj["sessions"]:
+                proj["sessions"].append(sid)
+            proj["analyzed_sessions"][sid] = {
+                "summary": "",
+                "user_goal": "",
+                "outcome": "partial",
+                "category": "other",
+                "key_tools": [],
+                "msg_count": 0,
+                "ts": ts,
+            }
+            if ts and ts > proj.get("last_active", ""):
+                proj["last_active"] = ts
+
+
+def ensure_claude_workspace(incremental=False):
+    """Make sure ~/.claude/apocalypse/workspace.json has project data.
+
+    The real summarization (workspace_init.py --incremental via Haiku) is
+    heavy and needs the API, so we never call it from the menu. When
+    workspace.json is missing or has no analyzed projects, we rebuild a
+    lightweight metadata-only version so the 'browse all projects' flow
+    works immediately. Idempotent: a no-op once workspace.json has projects.
+    """
+    ws = _load_workspace()
+    if ws and _workspace_has_projects(ws):
+        return
+    sys.stderr.write(f"\n  {DIM}Building project index from transcripts...{RESET}\n")
+    sys.stderr.flush()
+    if not isinstance(ws, dict):
+        ws = {"version": 1, "last_full_init": "", "projects": {}, "analyzed_session_ids": []}
+    ws.setdefault("version", 1)
+    _build_lightweight_projects(ws)
+    if _workspace_has_projects(ws):
+        _save_workspace(ws)
+
+
 def _build_session_lookup():
     ws = _load_workspace()
     if not ws:
@@ -682,7 +773,7 @@ def get_provider(mode):
         "load_projects": load_projects,
         "load_recent_sessions": lambda limit=5: _load_claude_recent_sessions(limit),
         "preview": parse_transcript_preview,
-        "ensure_workspace": lambda incremental=False: None,
+        "ensure_workspace": ensure_claude_workspace,
     }
 
 
