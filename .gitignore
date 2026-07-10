@@ -1,3 +1,8 @@
-skills_apocalypse/__pycache__/
+# Runtime data (never commit these)
+/.claude/apocalypse/
 runtime_apocalypse/
+*.log
+*.pid
+__pycache__/
+skills_apocalypse/__pycache__/
 *.pyc
