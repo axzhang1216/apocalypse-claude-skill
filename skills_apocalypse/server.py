@@ -501,6 +501,44 @@ def _find_codex_transcript(session_id):
     return matches[0] if matches else None
 
 
+def _export_to_cwd(session_id, text, kind):
+    """Write text to <session_cwd>/<timestamp>_<sid>.txt and return the
+    absolute output path. Returns (None, error_msg) on failure.
+
+    kind='claude' uses _find_transcript_path + _analyze_transcript;
+    kind='codex' uses _find_codex_transcript + _read_codex_session_meta.
+    """
+    if kind == "claude":
+        tpath = _find_transcript_path(session_id)
+        if not tpath:
+            return None, "transcript not found"
+        meta = _analyze_transcript(tpath)
+        if not meta:
+            return None, "could not analyze transcript"
+        cwd = meta.get("cwd") or ""
+    else:  # codex
+        tpath = _find_codex_transcript(session_id)
+        if not tpath:
+            return None, "transcript not found"
+        meta = _read_codex_session_meta(tpath)
+        if not meta:
+            return None, "could not read session_meta"
+        cwd = meta.get("cwd") or ""
+    if not cwd:
+        return None, "no working directory recorded for this session"
+    cwd_path = Path(cwd)
+    if not cwd_path.is_dir():
+        return None, f"working directory does not exist: {cwd}"
+    now = datetime.now()
+    stamp = f"{now.year:04d}-{now.month:02d}-{now.day:02d}T{now.hour:02d}-{now.minute:02d}-{now.second:02d}"
+    target = cwd_path / f"{stamp}_{session_id}.txt"
+    try:
+        target.write_text(text, encoding="utf-8")
+    except Exception as e:
+        return None, f"write failed: {e}"
+    return str(target), None
+
+
 def parse_codex_conversation(path):
     """Parse a Codex rollout JSONL into Claude-compatible messages.
 
@@ -908,7 +946,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.send_json({"error": "not found"}, 404)
 
         elif path == "/api/sessions2":
-            self.send_json(scan_transcripts())
+            # limit=None -> results[:None] returns the full list (no 50 cap);
+            # pagination is handled client-side in dashboard.html.
+            self.send_json(scan_transcripts(limit=None))
 
         elif path == "/api/codex/sessions":
             self.send_json(scan_codex_transcripts())
@@ -1158,8 +1198,33 @@ class Handler(http.server.BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_json({"ok": False, "error": str(e)}, 500)
 
+        elif path.startswith("/api/sessions2/") and path.endswith("/export"):
+            self._handle_export_post(path, "/api/sessions2/", "/export", "claude")
+
+        elif path.startswith("/api/codex/sessions/") and path.endswith("/export"):
+            self._handle_export_post(path, "/api/codex/sessions/", "/export", "codex")
+
         else:
             self.send_json({"error": "not found"}, 404)
+
+    def _handle_export_post(self, path, prefix, suffix, kind):
+        """POST handler for /api/{sessions2,codex/sessions}/<id>/export.
+        Writes the request body (text/plain) to <session_cwd>/<timestamp>_<sid>.txt."""
+        sid = path[len(prefix):-len(suffix)] if path.endswith(suffix) else ""
+        if "/" in sid or "\\" in sid or sid.startswith(".") or not sid:
+            self.send_json({"ok": False, "error": "bad id"}, 400)
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            text = self.rfile.read(length).decode("utf-8") if length else ""
+        except Exception:
+            self.send_json({"ok": False, "error": "bad body"}, 400)
+            return
+        written, err = _export_to_cwd(sid, text, kind)
+        if not written:
+            self.send_json({"ok": False, "error": err or "export failed"}, 400)
+            return
+        self.send_json({"ok": True, "path": written})
 
     def do_DELETE(self):
         path = self.path.split("?")[0]

@@ -129,6 +129,13 @@
   }
   .sr-item .sr-open:hover { background: var(--green); color: var(--bg); }
   .sr-item .sr-open:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  /* ── Pager ── */
+  #session-pager { position: sticky; bottom: 0; display: flex; align-items: center; justify-content: center; gap: 10px; padding: 8px 12px; border-top: 1px solid var(--border); background: var(--bg2); }
+  .pg-btn { background: transparent; border: 1px solid var(--border); color: var(--muted); padding: 3px 10px; border-radius: 4px; cursor: pointer; font-family: inherit; font-size: 12px; }
+  .pg-btn:hover:not(:disabled) { color: var(--text); background: var(--bg3); border-color: var(--blue); }
+  .pg-btn:disabled { opacity: 0.35; cursor: default; }
+  .pg-info { color: var(--muted); font-size: 12px; white-space: nowrap; }
 </style>
 </head>
 <body>
@@ -174,6 +181,7 @@
       <button class="icon-btn" onclick="refreshSessions()" title="Refresh">⟳</button>
     </h2>
     <div id="session-list"></div>
+    <div id="session-pager"></div>
   </div>
   <div id="detail-pane">
     <div id="detail-header">
@@ -198,6 +206,8 @@ let currentMsgs = [];
 let evtSource = null;
 let reconnectTimer = null;
 let currentTab = "claude";
+const PAGE_SIZE = 50;
+let currentPage = 1;
 
 function agentLabel() {
   return currentTab === "codex" ? "Codex" : "Claude";
@@ -212,6 +222,7 @@ function switchTab(tab) {
   document.getElementById('search-box').style.display = isCodex ? 'none' : '';
   if (typeof clearSearch === 'function') clearSearch();
   selectedId = null;
+  currentPage = 1;
   clearDetail();
   refreshSessions();
 }
@@ -268,9 +279,15 @@ function renderSessionList() {
     el.innerHTML = isCodex
       ? '<div style="color: var(--muted); padding: 16px;">No Codex sessions found in ~/.codex/sessions/</div>'
       : '<div style="color: var(--muted); padding: 16px;">No sessions found in ~/.claude/projects/</div>';
+    renderPager(1, 1);
     return;
   }
-  el.innerHTML = sessions.map(s => {
+  const totalPages = Math.max(1, Math.ceil(sessions.length / PAGE_SIZE));
+  if (currentPage > totalPages) currentPage = totalPages;
+  if (currentPage < 1) currentPage = 1;
+  const start = (currentPage - 1) * PAGE_SIZE;
+  const pageItems = sessions.slice(start, start + PAGE_SIZE);
+  el.innerHTML = pageItems.map(s => {
     const short = (s.session_id || '').slice(0, 8);
     const title = isCodex ? (s.thread_name || s.project_name || 'unknown') : (s.project_name || 'unknown');
     const leftCol = isCodex
@@ -327,6 +344,30 @@ function renderSessionList() {
       }
     });
   });
+  renderPager(currentPage, totalPages);
+}
+
+function renderPager(page, totalPages) {
+  const el = document.getElementById('session-pager');
+  if (!el) return;
+  if (totalPages <= 1) { el.innerHTML = ''; return; }
+  el.innerHTML = '';
+  const prev = document.createElement('button');
+  prev.className = 'pg-btn';
+  prev.textContent = '‹ 上一页';
+  prev.disabled = page <= 1;
+  prev.onclick = () => { if (currentPage > 1) { currentPage--; renderSessionList(); } };
+  const info = document.createElement('span');
+  info.className = 'pg-info';
+  info.textContent = `第 ${page} / ${totalPages} 页（共 ${sessions.length} 条）`;
+  const next = document.createElement('button');
+  next.className = 'pg-btn';
+  next.textContent = '下一页 ›';
+  next.disabled = page >= totalPages;
+  next.onclick = () => { if (currentPage < totalPages) { currentPage++; renderSessionList(); } };
+  el.appendChild(prev);
+  el.appendChild(info);
+  el.appendChild(next);
 }
 
 function clearDetail() {
@@ -364,23 +405,26 @@ function buildExportText(msgs) {
   }).join('\n\n') + '\n';
 }
 
-function exportConversation() {
+async function exportConversation() {
   if (!selectedId || !currentMsgs.length) { toast('Nothing to export'); return; }
   const text = buildExportText(currentMsgs);
-  const now = new Date();
-  const pad = n => String(n).padStart(2, '0');
-  const stamp = now.getFullYear() + '-' + pad(now.getMonth() + 1) + '-' + pad(now.getDate())
-    + 'T' + pad(now.getHours()) + '-' + pad(now.getMinutes()) + '-' + pad(now.getSeconds());
-  const filename = stamp + '_' + selectedId + '.txt';
-  const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  const url = (currentTab === 'codex' ? '/api/codex/sessions/' : '/api/sessions2/')
+    + encodeURIComponent(selectedId) + '/export';
+  try {
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: text,
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) {
+      toast('Export failed: ' + (j.error || ('HTTP ' + r.status)));
+      return;
+    }
+    toast('Exported to ' + j.path);
+  } catch (e) {
+    toast('Export failed: ' + e.message);
+  }
 }
 
 function msgHTML(m) {
