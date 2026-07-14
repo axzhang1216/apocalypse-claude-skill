@@ -18,6 +18,11 @@ PROJECTS_DIR = Path.home() / ".claude" / "projects"
 DATA_DIR = Path.home() / ".claude" / "apocalypse"
 WORKSPACE_FILE = DATA_DIR / "workspace.json"
 HAIKU_MODEL = "claude-haiku-4-5-20251001"
+# Grouping (discussion-decision pairs) needs stronger reasoning + stability than
+# Haiku gives — under the same prompt Haiku's pair count swings wildly (e.g. 3→9
+# on one session). Summarization (_summarize_long_assistant) stays on Haiku: it is
+# simple and cheap.
+GROUPING_MODEL = "claude-sonnet-4-5-20250929"
 
 CONFIG_FILE = DATA_DIR / "config.json"
 
@@ -1029,42 +1034,135 @@ def _summarize_messages(client, messages, threshold=200):
                 messages[i]["summary"] = s
 
 
-def _haiku_group_user_messages(client, user_msgs, session_meta):
-    """Ask Haiku to group user messages by topic (consecutive same-topic = one point).
-    Returns list of {user_indices, topic, decision, related_topics} or [] on failure.
+def _haiku_group_user_messages(client, user_msgs, session_meta, transcript=None):
+    """Ask Haiku to group user messages into discussion-decision pairs.
+
+    If `transcript` is provided (list of {role, ts, text, line_no} entries in
+    chronological order, including both user and assistant text), the prompt
+    shows the interleaved U/A stream so Haiku can judge when a topic truly
+    ended (decision reached, code ran cleanly, user moved on). Without
+    transcript, falls back to the legacy user-only prompt.
+
+    Returns list of {user_indices, topic, decision} on success, [] on failure.
     """
-    user_list = "\n".join("[U" + str(u["idx"]) + "] " + u["text"][:300] for u in user_msgs)
     session_goal = session_meta.get("user_goal", "unknown")
-    prompt = (
-        "You are analyzing a Claude Code session's user messages in order.\n"
-        "The user talks about several different topics across the conversation. Each time the user SWITCHES to a new topic, that starts a NEW discussion-decision pair.\n"
-        "Rules:\n"
-        "- Consecutive user messages on the SAME topic = one discussion-decision pair (merge them).\n"
-        "- The moment the user asks about a different topic, cut. Previous messages belong to the previous pair; the new message starts a new pair.\n"
-        "- If the entire session is one continuous topic, return a single group with all user message indices.\n"
-        "Session goal: " + session_goal + "\n"
-        "User messages in order:\n" + user_list + "\n"
-        "Reply in JSON only (no markdown fences):\n"
-        "{\n"
-        '  "groups": [\n'
-        "    {\n"
-        '      "user_indices": [0, 1, 2],\n'
-        '      "topic": "short topic label (max 25 chars)",\n'
-        '      "decision": "what was decided or done in this exchange (one sentence)",\n'
-        '      "related_topics": ["topic label of another group in this list that is causally/topically related"]\n'
-        "    }\n"
-        "  ]\n"
-        "}\n"
-        "Rules:\n"
-        "- user_indices are zero-based, in ascending order.\n"
-        "- Every user index must appear in exactly one group (cover all indices).\n"
-        "- topic should be short and specific.\n"
-        "- decision is concrete: what tool, what approach, what was changed, or current state.\n"
-        "- related_topics links groups within this session that are related; leave [] if none."
-    )
+
+    if transcript is None:
+        # Legacy user-only path (kept for back-compat; extract_points always
+        # passes transcript now).
+        user_list = "\n".join(
+            "[U" + str(u["idx"]) + "] " + u["text"][:300] for u in user_msgs
+        )
+        prompt = (
+            "You are analyzing a Claude Code session's user messages in order.\n"
+            "The user talks about several different topics across the conversation. "
+            "Each time the user SWITCHES to a new topic, that starts a NEW "
+            "discussion-decision pair.\n"
+            "Rules:\n"
+            "- Consecutive user messages on the SAME topic = one discussion-decision pair (merge them).\n"
+            "- The moment the user asks about a different topic, cut. Previous messages belong to the previous pair; the new message starts a new pair.\n"
+            "- If the entire session is one continuous topic, return a single group with all user message indices.\n"
+            "Session goal: " + session_goal + "\n"
+            "User messages in order:\n" + user_list + "\n"
+            "Reply in JSON only (no markdown fences):\n"
+            "{\n"
+            '  "groups": [\n'
+            "    {\n"
+            '      "user_indices": [0, 1, 2],\n'
+            '      "topic": "short topic label (max 25 chars)",\n'
+            '      "decision": "what was decided or done in this exchange (one sentence)",\n'
+            '      "related_topics": ["topic label of another group in this list that is causally/topically related"]\n'
+            "    }\n"
+            "  ]\n"
+            "}\n"
+            "Rules:\n"
+            "- user_indices are zero-based, in ascending order.\n"
+            "- Every user index must appear in exactly one group (cover all indices).\n"
+            "- topic should be short and specific.\n"
+            "- decision is concrete: what tool, what approach, what was changed, or current state.\n"
+            "- related_topics links groups within this session that are related; leave [] if none."
+        )
+    else:
+        # Build interleaved U/A stream: user messages get their stable user_idx;
+        # assistant messages get sequential A0..An markers.
+        user_list = "\n".join(
+            "[U" + str(u["idx"]) + "] " + u["text"][:500] for u in user_msgs
+        )
+
+        prompt = (
+            "You are analyzing a Claude Code session's USER messages in order. "
+            "Group them into \"discussion-decision pairs\".\n"
+            "\n"
+            "GROUPING RULES:\n"
+            "\n"
+            "STRONG DEFAULT — MERGE. When unsure whether to cut, DO NOT cut (keep merging). "
+            "A 30-50 message session typically yields only 2-4 pairs. Most user messages are "
+            "research steps, sub-tasks, or iterations that STAY in the current pair.\n"
+            "\n"
+            "Key concept — THEME GOAL: the user's current focus — ONE feature being built/refined, "
+            "OR ONE research topic being analyzed, OR ONE work phase (e.g. paper-writing). "
+            "A discussion-decision pair = ALL consecutive work on ONE theme goal.\n"
+            "\n"
+            "1. SAME theme goal → ONE pair. FORCE-MERGE everything below into the current pair; do NOT cut between sub-steps just because the sub-task label changes:\n"
+            "   - Sub-stages / sub-questions / debugging iterations / retries of one feature.\n"
+            "   - Research sub-stages of ONE topic: define → train → visualize → debug → quantitative analysis → compare with old results. ALL one pair, even across 25+ messages.\n"
+            "   - Plotting a figure + 6 messages fixing its latitude orientation. ONE pair.\n"
+            "   - \"写文章 ABC 一步步来\" repeated many times. ONE pair.\n"
+            "   - Wrap-up actions (\"提交github吧\"/\"commit it\") at the end of a feature. Same pair.\n"
+            "\n"
+            "2. NOISE / TRANSITION messages — attach to the surrounding theme goal; never create a boundary:\n"
+            "   - System continuation banners (\"This session is being continued from a previous conversation...\") — attach to whatever theme goal they sit inside (usually the one that follows). Every user message, INCLUDING banners/noise, MUST appear in exactly one group — never drop an index.\n"
+            "   - Short acknowledgements (\"好\"/\"ok\"/\"好的\"/\"继续\"/\"嗯\"/\"haode\").\n"
+            "   - Context/availability queries (\"我还能看到之前的聊天记录吗\"/\"你能读图吗\").\n"
+            "   - Tool-interrupt markers (\"[Request interrupted by user]\").\n"
+            "   - Pure status messages (\"连好了\"/\"太乙连上了\").\n"
+            "\n"
+            "3. NEW pair starts at Ui ONLY when Ui begins a DIFFERENT theme goal. Distinguish two cases:\n"
+            "   - NEW FEATURE REQUEST (\"我要做一个X\"/\"加一个X功能\"/\"add a heatmap\"/\"fix sidebar\") or NEW RESEARCH TOPIC/PHASE (MWP analysis → WPSH analysis → paper writing) → CUT, new pair.\n"
+            "   - RESEARCH STEP / implementation sub-task of the current topic (\"训练\"/\"画图\"/\"debug\"/\"定量分析\"/\"核查\"/\"再remind我\") → STAY in current pair. NEVER cut between research sub-steps of one topic, even if the sub-task name changes (define → train → plot → analyze are ONE pair).\n"
+            "   - A standalone independent DECISION (\"先短期吧...\") or a CORRECTION/REDEFINITION (\"你理解错了...\") → its own single-message pair.\n"
+            "   - A short independent feature the user raises and resolves in one message (\"add a heatmap\"/\"fix sidebar click\"/\"show chat log\") → own pair.\n"
+            "   NOTE: \"下面做下一件事\" / \"下面做X\" only cuts if X is a DIFFERENT theme goal. If X continues the same tool/phase (e.g. launcher → workspace-update → notifications are all one CLI-tooling phase), do NOT cut.\n"
+            "\n"
+            "WORKED EXAMPLE A — research session. NOTE how CHECKING/VERIFICATION messages and research STEPS all MERGE into one pair:\n"
+            "  [U0] 用CMIP数据重做SOM分类  [U1] 训练n=5看DBI  [U2] 我还能看到之前的聊天记录吗  [U3] 画出5类气象场图  [U4] 图纬度反了修一下  [U5] 核查一下，画的是mean还是centroid  [U6] 做定量分析按thesis格式  [U7] 下面搜文献，副高未来怎么变  [U8] 好，开始写文章\n"
+            "  Correct pairs: {[0,1,2,3,4,5,6] \"MWP analysis\"} {[7] \"WPSH analysis\"} {[8] \"paper drafting\"}\n"
+            "  Why: U2 (checking history) and U5 (verifying method) are part of the MWP research → MERGE. U1/U3/U4/U6 are research steps → MERGE. ALL of U0-U6 = ONE pair (7 messages). U7 = NEW topic. U8 = NEW phase.\n"
+            "\n"
+            "WORKED EXAMPLE B — feature-dev session:\n"
+            "  [U0] 打磨init功能  [U1] 加报告  [U2] 继续调  [U3] 更新github  [U4] 下面开发启动器  [U5] 调试启动器  [U6] 好下面做下一件事，加workspace更新逻辑  [U7] 加活跃度热力图  [U8] 做搜索框  [U9] 先短期吧  [U10] 改成点击星云出侧边栏  [U11] 侧边栏展示聊天记录\n"
+            "  Correct pairs: {[0-3] \"init refinement\"} {[4,5,6] \"CLI tooling (launcher+update)\"} {[7] \"heatmap\"} {[8,9] \"search\"} {[10] \"sidebar interaction\"} {[11] \"chat-log display\"}\n"
+            "  Why: U6 says \"下面做下一件事\" but workspace-update is still the SAME CLI-tooling phase as launcher → MERGED (do NOT cut on a transition phrase alone when it is the same phase). heatmap/search/sidebar/chat are DIFFERENT UI features → separate pairs.\n"
+            "\n"
+            "Apply this same logic to the session below.\n"
+            "\n"
+            "FINAL GUIDANCE — bias toward FEWER, LARGER pairs. A whole research arc (define+train+visualize+analyze one topic) is ONE pair. A whole CLI/tooling phase (launcher+update+notifications) is ONE pair. Cut separate pairs ONLY for genuinely different product features (heatmap/search/sidebar/chat) or different research topics/phases.\n"
+            "\n"
+            f"Session goal: {session_goal}\n"
+            "\n"
+            f"User messages in order ({len(user_msgs)} total; "
+            f"indices 0..{len(user_msgs)-1}):\n"
+            f"{user_list}\n"
+            "\n"
+            "Reply in JSON only (no markdown fences):\n"
+            "{\n"
+            '  "groups": [\n'
+            "    {\n"
+            '      "user_indices": [0, 1, 2],\n'
+            '      "topic": "short topic label of the LARGE TASK (max 25 chars)",\n'
+            '      "decision": "what was ultimately decided or built for this whole task (1 sentence)"\n'
+            "    }\n"
+            "  ]\n"
+            "}\n"
+            "Rules:\n"
+            "- user_indices are zero-based, in ascending order.\n"
+            "- Every user index must appear in exactly one group (cover all indices).\n"
+            "- topic labels the LARGE TASK, not a sub-step.\n"
+            "- decision summarises the final state of the whole task, not a mid-task observation."
+        )
     try:
         resp = client.messages.create(
-            model=HAIKU_MODEL,
+            model=GROUPING_MODEL,
             max_tokens=2048,
             messages=[{"role": "user", "content": prompt}],
         )
@@ -1137,7 +1235,7 @@ def extract_points():
             if not user_msgs:
                 continue
 
-            groups = _haiku_group_user_messages(client, user_msgs, s)
+            groups = _haiku_group_user_messages(client, user_msgs, s, transcript=transcript)
             if not groups:
                 continue
 
