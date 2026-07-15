@@ -53,12 +53,13 @@ menu behaviour are unchanged.
 1. **Hooks** (`hooks/on-tool.sh`, `hooks/on-stop.sh`) fire on every Claude Code tool call and session stop. They append JSON events to `~/.claude/apocalypse/events.jsonl` and copy transcripts to `~/.claude/apocalypse/sessions/`.
 
 2. **`server.py`** serves the dashboard on port 7749. Key responsibilities:
-   - `GET /api/sessions2` — scans `~/.claude/projects/` (Claude Code's native transcript store) and returns session metadata with tri-state status (green/yellow/grey)
+   - `GET /api/sessions2` — scans `~/.claude/projects/` (Claude Code's native transcript store) and returns **all** session metadata with tri-state status (green/yellow/grey); the dashboard paginates them client-side (`PAGE_SIZE` per page)
    - `GET /api/sessions2/<id>` — parses a full transcript into user/assistant/tool messages
    - `GET /events/stream` — SSE endpoint; a background thread tails `events.jsonl` and pushes new lines to all connected clients
    - `DELETE /api/sessions2/<id>` — removes Apocalypse-managed artifacts (events + snapshots) without touching the original `~/.claude/projects/` transcripts
    - `GET /api/codex/sessions` — scans `~/.codex/sessions/**/*.jsonl` (OpenAI Codex CLI rollouts), reads each file's `session_meta` for id/cwd/timestamp, enriches with `thread_name` from `~/.codex/session_index.jsonl`. Read-only, no hooks.
    - `GET /api/codex/sessions/<id>` — parses a Codex rollout's `response_item` records into the same message schema as Claude (user/assistant/tool+output; developer/reasoning skipped; tool outputs linked by `call_id`)
+   - `POST /api/sessions2/<id>/export` / `POST /api/codex/sessions/<id>/export` — write the conversation as `<cwd>/<timestamp>_<sid>.txt` into the session's working directory (frontend POSTs the rendered text; toasts the returned absolute path)
 
 3. **`dashboard.html`** — single-file frontend with no CDN dependencies. Connects to the SSE stream for live updates.
 
@@ -115,11 +116,12 @@ Apocalypse runs on **Windows, macOS, and Linux**. All platform-specific behaviou
 
 | Constant | Location | Value |
 |---|---|---|
-| `PORT` | `server.py:7` | `7749` |
-| `STALE_SECONDS` | `server.py:21` | `86400` (1 day) |
-| `TRANSCRIPT_LIMIT` | `server.py:22` | 50 most recent sessions |
-| `SKIP_TYPES` | `server.py:24` | Record types filtered out during transcript parsing |
-| `CODEX_TRANSCRIPT_LIMIT` | `server.py` | 200 most recent Codex sessions |
+| `PORT` | `server.py:18` | `7749` |
+| `STALE_SECONDS` | `server.py:27` | `86400` (1 day) |
+| `TRANSCRIPT_LIMIT` | `server.py:28` | 50 (function default only; the dashboard's `/api/sessions2` passes `limit=None` → returns all sessions) |
+| `SKIP_TYPES` | `server.py:36` | Record types filtered out during transcript parsing |
+| `CODEX_TRANSCRIPT_LIMIT` | `server.py:33` | 200 most recent Codex sessions |
+| `PAGE_SIZE` | `dashboard.html` | 50 (client-side pagination; the dashboard fetches all sessions and pages them in the browser) |
 
 ## Workspace Visualization
 
