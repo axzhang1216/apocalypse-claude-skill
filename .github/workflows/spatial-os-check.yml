@@ -41,7 +41,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: spatial-jscheck
-          path: jscheck.txt
+          path: |
+            jscheck.txt
+            skills_apocalypse/spatial_os.js
       - name: Fail on JavaScript syntax error
         if: steps.jscheck.outcome == 'failure'
         run: cat jscheck.txt && exit 1
