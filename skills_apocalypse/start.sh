@@ -33,15 +33,22 @@ server_alive() {
     return 1
 }
 
+spatial_alive() {
+    curl -sf -m 1 "http://localhost:$PORT/api/world" >/dev/null 2>&1
+}
+
 start_server() {
     local entry="$SKILL_DIR/spatial_server.py"
     [ -f "$entry" ] || entry="$SKILL_DIR/server.py"
     nohup "$PY" "$entry" >"$LOG_FILE" 2>&1 &
     disown 2>/dev/null || true
-    # Wait up to 3s for the server to bind
+    # Wait up to 3s for the server to bind. Spatial builds expose /api/world;
+    # the legacy fallback continues to use /api/events.
     for _ in 1 2 3 4 5 6; do
         sleep 0.5
-        if curl -sf -m 1 "http://localhost:$PORT/api/events" >/dev/null 2>&1; then
+        if [ -f "$SKILL_DIR/spatial_server.py" ]; then
+            spatial_alive && return 0
+        elif curl -sf -m 1 "http://localhost:$PORT/api/events" >/dev/null 2>&1; then
             return 0
         fi
     done
@@ -49,7 +56,22 @@ start_server() {
 }
 
 if server_alive; then
-    echo "Apocalypse server already running (pid $(cat "$PID_FILE"))"
+    if [ -f "$SKILL_DIR/spatial_server.py" ] && ! spatial_alive; then
+        # Upgrade an Apocalypse-owned legacy process in place. We only kill the
+        # PID from Apocalypse's own pid file; an unrelated process on 7749 is
+        # never touched here.
+        old_pid=$(cat "$PID_FILE" 2>/dev/null || true)
+        echo "Upgrading Apocalypse server to Spatial OS (pid $old_pid)"
+        kill "$old_pid" 2>/dev/null || true
+        for _ in 1 2 3 4 5 6; do
+            sleep 0.25
+            kill -0 "$old_pid" 2>/dev/null || break
+        done
+        rm -f "$PID_FILE"
+        start_server || echo "WARNING: server may have failed to start; check $LOG_FILE" >&2
+    else
+        echo "Apocalypse server already running (pid $(cat "$PID_FILE"))"
+    fi
 elif curl -sf -m 1 "http://localhost:$PORT/api/events" >/dev/null 2>&1; then
     echo "Apocalypse server already running on port $PORT"
 else
