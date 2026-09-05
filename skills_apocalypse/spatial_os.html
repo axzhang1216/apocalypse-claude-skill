@@ -5,6 +5,28 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Apocalypse Spatial OS</title>
 <link rel="stylesheet" href="/spatial_os.css">
+<style>
+/* Focused OPS panels float above a frosted version of the live dashboard. */
+#ops .ops-focus-veil{
+  background:rgba(8,12,18,.08);
+  -webkit-backdrop-filter:blur(0) saturate(1) brightness(1);
+  backdrop-filter:blur(0) saturate(1) brightness(1);
+  transition:opacity .38s ease,background .38s ease,-webkit-backdrop-filter .58s cubic-bezier(.16,.84,.32,1),backdrop-filter .58s cubic-bezier(.16,.84,.32,1);
+}
+#ops.panel-focus .ops-focus-veil{
+  opacity:1;
+  background:radial-gradient(circle at 50% 46%,rgba(111,148,184,.055),rgba(7,10,15,.24) 42%,rgba(5,8,12,.46));
+  -webkit-backdrop-filter:blur(24px) saturate(.72) brightness(.82);
+  backdrop-filter:blur(24px) saturate(.72) brightness(.82);
+}
+#ops.panel-focus .zone.focus{
+  background:radial-gradient(circle at var(--mx) var(--my),rgba(228,138,174,.1),rgba(111,148,184,.07) 27%,transparent 60%),linear-gradient(145deg,rgba(18,25,34,.78),rgba(11,17,24,.72));
+  -webkit-backdrop-filter:blur(18px) saturate(1.08)!important;
+  backdrop-filter:blur(18px) saturate(1.08)!important;
+  border-color:rgba(184,198,214,.2);
+  box-shadow:0 38px 120px rgba(0,0,0,.5),0 0 80px rgba(111,148,184,.09),inset 0 1px 0 rgba(255,255,255,.045);
+}
+</style>
 </head>
 <body>
 <canvas id="stars"></canvas><div class="cursor-orb" id="cursorOrb"></div>
