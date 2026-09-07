@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
 # Apocalypse install script
 # Usage: bash install.sh
-# Installs the skill to ~/.claude/skills/apocalypse/ and registers hooks.
+# Installs the skill and the standalone Apocalypse UI launcher.
 #
 # Cross-platform: detects Windows (Git Bash / MSYS / Cygwin), macOS, Linux.
-# Skips Windows-only files on Unix and writes the launcher alias to the
-# correct shell rc file (.zshrc / .bashrc / fish config.fish).
+# The web UI can be started independently of Claude Code / any LLM with:
+#   apocalypse-ui
+# Workspace analysis remains an explicit, separate operation.
 
 set -e
 
 DEST="$HOME/.claude/skills/apocalypse"
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-# ── Platform detection ───────────────────────────────────────────────────────
 case "$OSTYPE" in
     msys*|cygwin*|win32) PLATFORM="windows" ;;
     darwin*)             PLATFORM="macos"   ;;
@@ -20,7 +20,6 @@ case "$OSTYPE" in
     *)                   PLATFORM="other"   ;;
 esac
 
-# Resolve a working python (Windows has a broken python3 stub in WindowsApps)
 if command -v python3 >/dev/null 2>&1 && python3 -c "" >/dev/null 2>&1; then
     PY=python3
 else
@@ -28,16 +27,20 @@ else
 fi
 
 echo "Installing Apocalypse to $DEST (platform: $PLATFORM, python: $PY) ..."
-
 mkdir -p "$DEST/hooks"
 
-# ── Cross-platform file copies ───────────────────────────────────────────────
+# Core web UI + compatibility backend
 cp "$REPO_DIR/SKILL.md"               "$DEST/SKILL.md"
 cp "$REPO_DIR/server.py"              "$DEST/server.py"
 cp "$REPO_DIR/spatial_server.py"      "$DEST/spatial_server.py"
 cp "$REPO_DIR/spatial_os.html"        "$DEST/spatial_os.html"
 cp "$REPO_DIR/spatial_os.css"         "$DEST/spatial_os.css"
 cp "$REPO_DIR/spatial_os.js"          "$DEST/spatial_os.js"
+cp "$REPO_DIR/apocalypse_ui.py"       "$DEST/apocalypse_ui.py"
+cp "$REPO_DIR/apocalypse-ui"          "$DEST/apocalypse-ui"
+cp "$REPO_DIR/apocalypse-ui.cmd"      "$DEST/apocalypse-ui.cmd"
+
+# Existing dashboard / workspace / agent integration
 cp "$REPO_DIR/dashboard.html"         "$DEST/dashboard.html"
 cp "$REPO_DIR/start.sh"               "$DEST/start.sh"
 cp "$REPO_DIR/hooks/on-tool.sh"       "$DEST/hooks/on-tool.sh"
@@ -48,134 +51,128 @@ cp "$REPO_DIR/apocalypse.py"          "$DEST/apocalypse.py"
 cp "$REPO_DIR/codex_workspace.py"     "$DEST/codex_workspace.py"
 cp "$REPO_DIR/platform_utils.py"      "$DEST/platform_utils.py"
 
-# The apocalypse/ Python package (CLI subcommands + launcher). apocalypse.py is
-# now a thin wrapper that imports from this package, so it must be deployed
-# alongside the wrapper or `apocalypse` breaks at import time.
 if [ -d "$REPO_DIR/apocalypse" ]; then
     rm -rf "$DEST/apocalypse/__pycache__"
     mkdir -p "$DEST/apocalypse"
     cp "$REPO_DIR"/apocalypse/*.py "$DEST/apocalypse/"
 fi
-cp "$REPO_DIR/apocalypse.sh"          "$DEST/apocalypse.sh"
-chmod +x "$DEST/apocalypse.sh"
+cp "$REPO_DIR/apocalypse.sh" "$DEST/apocalypse.sh"
 
-# Windows-only launcher: skip on macOS / Linux
 if [ "$PLATFORM" = "windows" ]; then
     cp "$REPO_DIR/apocalypse.cmd" "$DEST/apocalypse.cmd"
 fi
 
-# Vendor JS for the workspace 3D view. workspace.html dynamically imports
-# /three.module.min.js; without this file the workspace page fails to load.
 for vendor in three.module.min.js OrbitControls.js; do
   if [ -f "$REPO_DIR/$vendor" ]; then
     cp "$REPO_DIR/$vendor" "$DEST/$vendor"
   elif [ ! -f "$DEST/$vendor" ]; then
-    echo "WARNING: $vendor not found in $REPO_DIR — workspace.html will not load until you place it in $DEST" >&2
+    echo "WARNING: $vendor not found in $REPO_DIR — legacy workspace.html may not load" >&2
   fi
 done
-
-# Texture assets for workspace visual effects
-for tex in mesh1.png mesh2.png mesh3.png; do
-  if [ -f "$REPO_DIR/$tex" ]; then
-    cp "$REPO_DIR/$tex" "$DEST/$tex"
-  fi
+for tex in "$REPO_DIR"/*.png "$REPO_DIR"/*.jpg "$REPO_DIR"/*.jpeg; do
+  [ -f "$tex" ] && cp "$tex" "$DEST/"
 done
 
-chmod +x "$DEST/start.sh" "$DEST/hooks/on-tool.sh" "$DEST/hooks/on-stop.sh"
+chmod +x "$DEST/start.sh" "$DEST/apocalypse.sh" "$DEST/apocalypse-ui" \
+         "$DEST/hooks/on-tool.sh" "$DEST/hooks/on-stop.sh"
 
-# ── Launcher alias: pick the right rc file for the user's shell ─────────────
-# Detect shell from $SHELL; fall back to platform default.
+# ── Standalone UI launcher ──────────────────────────────────────────────────
+# This is deliberately independent of Claude Code and does not run workspace
+# analysis or any LLM call.
+mkdir -p "$HOME/bin"
+if [ "$PLATFORM" = "windows" ]; then
+    cp "$DEST/apocalypse-ui.cmd" "$HOME/bin/apocalypse-ui.cmd"
+    [ -f "$DEST/apocalypse.cmd" ] && cp "$DEST/apocalypse.cmd" "$HOME/bin/apocalypse.cmd"
+    echo "Installed standalone launcher: ~/bin/apocalypse-ui.cmd"
+else
+    cp "$DEST/apocalypse-ui" "$HOME/bin/apocalypse-ui"
+    chmod +x "$HOME/bin/apocalypse-ui"
+    echo "Installed standalone launcher: ~/bin/apocalypse-ui"
+fi
+
+# Existing apocalypse CLI alias (session browser / update commands)
 SHELL_NAME=""
 case "$SHELL" in
     */zsh)  SHELL_NAME="zsh"  ;;
     */bash) SHELL_NAME="bash" ;;
     */fish) SHELL_NAME="fish" ;;
     *)
-        # No $SHELL or unknown — fall back to platform default
-        if [ "$PLATFORM" = "macos" ]; then
-            SHELL_NAME="zsh"
-        elif [ "$PLATFORM" = "linux" ]; then
-            SHELL_NAME="bash"
-        fi
+        if [ "$PLATFORM" = "macos" ]; then SHELL_NAME="zsh";
+        elif [ "$PLATFORM" = "linux" ]; then SHELL_NAME="bash"; fi
         ;;
 esac
 
 write_alias() {
     local rc="$1" line="$2" marker="$3"
-    if [ -z "$rc" ] || [ -z "$line" ]; then return 0; fi
+    [ -z "$rc" ] || [ -z "$line" ] && return 0
     if [ -f "$rc" ] && grep -qF "$marker" "$rc" 2>/dev/null; then
-        echo "Launcher alias already in $(basename "$rc")"
         return 0
     fi
-    mkdir -p "$(dirname "$rc")"
-    touch "$rc"
-    {
-        echo ""
-        echo "# Apocalypse launcher"
-        echo "$line"
-    } >> "$rc"
-    echo "Added 'apocalypse' alias to $(basename "$rc")"
+    mkdir -p "$(dirname "$rc")"; touch "$rc"
+    printf '\n# Apocalypse launcher\n%s\n' "$line" >> "$rc"
 }
 
 if [ "$PLATFORM" = "windows" ]; then
-    # Windows: copy .cmd to ~/bin (must be on PATH)
-    if [ -f "$DEST/apocalypse.cmd" ]; then
-        mkdir -p "$HOME/bin"
-        cp "$DEST/apocalypse.cmd" "$HOME/bin/apocalypse.cmd"
-        echo "Copied apocalypse.cmd to ~/bin (Windows launcher)"
-    fi
-    # Also keep the .bashrc alias (Git Bash users on Windows use bash).
-    ALIAS_LINE="alias apocalypse='PYTHONUTF8=1 $PY \"\$HOME/.claude/skills/apocalypse/apocalypse.py\"'"
-    write_alias "$HOME/.bashrc" "$ALIAS_LINE" '.claude/skills/apocalypse/apocalypse.py'
+    write_alias "$HOME/.bashrc" "alias apocalypse='PYTHONUTF8=1 $PY \"\$HOME/.claude/skills/apocalypse/apocalypse.py\"'" '.claude/skills/apocalypse/apocalypse.py'
 else
-    # macOS / Linux: write to the right rc file based on shell
     case "$SHELL_NAME" in
-        zsh)
-            ALIAS_LINE="alias apocalypse='PYTHONUTF8=1 $PY \"\$HOME/.claude/skills/apocalypse/apocalypse.py\"'"
-            write_alias "$HOME/.zshrc" "$ALIAS_LINE" '.claude/skills/apocalypse/apocalypse.py'
-            ;;
-        bash)
-            ALIAS_LINE="alias apocalypse='PYTHONUTF8=1 $PY \"\$HOME/.claude/skills/apocalypse/apocalypse.py\"'"
-            write_alias "$HOME/.bashrc" "$ALIAS_LINE" '.claude/skills/apocalypse/apocalypse.py'
-            ;;
-        fish)
-            # fish syntax differs — no `=` form
-            FISH_LINE="alias apocalypse 'PYTHONUTF8=1 $PY $HOME/.claude/skills/apocalypse/apocalypse.py'"
-            write_alias "$HOME/.config/fish/config.fish" "$FISH_LINE" '.claude/skills/apocalypse/apocalypse.py'
-            ;;
-        *)
-            echo "NOTE: could not detect shell ($SHELL). Add this alias manually:"
-            echo "  alias apocalypse='PYTHONUTF8=1 $PY \$HOME/.claude/skills/apocalypse/apocalypse.py'"
-            ;;
+        zsh)  write_alias "$HOME/.zshrc"  "alias apocalypse='PYTHONUTF8=1 $PY \"\$HOME/.claude/skills/apocalypse/apocalypse.py\"'" '.claude/skills/apocalypse/apocalypse.py' ;;
+        bash) write_alias "$HOME/.bashrc" "alias apocalypse='PYTHONUTF8=1 $PY \"\$HOME/.claude/skills/apocalypse/apocalypse.py\"'" '.claude/skills/apocalypse/apocalypse.py' ;;
+        fish) write_alias "$HOME/.config/fish/config.fish" "alias apocalypse 'PYTHONUTF8=1 $PY $HOME/.claude/skills/apocalypse/apocalypse.py'" '.claude/skills/apocalypse/apocalypse.py' ;;
     esac
 fi
 
+# ── Claude hooks: installation-time integration, not UI startup ─────────────
+# Hooks only enrich live tool events. Apocalypse UI itself can run without
+# Claude Code. Register idempotently when the install environment has ~/.claude.
+APOCALYPSE_SKILL_DIR="$DEST" "$PY" <<'PYEOF'
+import json, os
+from pathlib import Path
+p = Path.home()/'.claude'/'settings.local.json'
+skill = os.environ['APOCALYPSE_SKILL_DIR'].replace('\\','/')
+try:
+    cfg = json.loads(p.read_text('utf-8')) if p.exists() else {}
+except Exception:
+    cfg = {}
+hooks = cfg.setdefault('hooks', {})
+
+def has(items, marker):
+    for e in items:
+        if marker in str(e): return True
+    return False
+
+changed=False
+on_tool=f'bash "{skill}/hooks/on-tool.sh"'
+for event, cmd in [('PreToolUse', on_tool+' pre'), ('PostToolUse', on_tool+' post')]:
+    rows=hooks.setdefault(event,[])
+    if not has(rows,'on-tool.sh'):
+        rows.append({'matcher':'.*','hooks':[{'type':'command','command':cmd}]}); changed=True
+rows=hooks.setdefault('Stop',[])
+if not has(rows,'on-stop.sh'):
+    rows.append({'matcher':'','hooks':[{'type':'command','command':f'bash "{skill}/hooks/on-stop.sh"'}]}); changed=True
+if changed:
+    p.parent.mkdir(parents=True,exist_ok=True)
+    p.write_text(json.dumps(cfg,indent=2),encoding='utf-8')
+    print('Claude hooks registered (optional realtime enrichment).')
+PYEOF
+
+echo ""
 echo "Files installed."
 echo ""
-echo "Starting server and registering hooks ..."
-bash "$DEST/start.sh"
+echo "Standalone UI (NO LLM):"
+echo "  apocalypse-ui             # start server + open browser"
+echo "  apocalypse-ui status      # inspect local server"
+echo "  apocalypse-ui stop        # stop local server"
+echo "  apocalypse-ui restart     # restart local server"
 echo ""
-echo "🌋 Apocalypse → http://localhost:7749"
-echo "   Legacy dashboard → http://localhost:7749/legacy/dashboard"
+echo "Direct fallback:"
+echo "  $PY $DEST/apocalypse_ui.py start"
 echo ""
-if [ "$PLATFORM" = "windows" ]; then
-    echo "Launcher: type 'apocalypse' to browse projects and resume sessions."
-    echo "  First time: open a new terminal, then type: apocalypse"
-else
-    echo "Launcher: type 'apocalypse' to browse projects and resume sessions."
-    case "$SHELL_NAME" in
-        zsh)  echo "  First time: run 'source ~/.zshrc' (or open a new terminal), then: apocalypse" ;;
-        bash) echo "  First time: run 'source ~/.bashrc' (or open a new terminal), then: apocalypse" ;;
-        fish) echo "  First time: open a new shell, then: apocalypse" ;;
-        *)    echo "  First time: open a new terminal, then: apocalypse" ;;
-    esac
-fi
-
+echo "Workspace analysis remains separate:"
+echo "  apocalypse --update"
 echo ""
-echo "────────────────────────────────────────────────────────────"
-echo "  Apocalypse 历史归档已默认开启"
-echo "  每次 update workspace 会把聊天按讨论/决策切块，导出到"
-echo "  各项目下的 .apocalypse/，并在 CLAUDE.md 插入说明段落。"
-echo "  关闭方法：编辑 ~/.claude/apocalypse/config.json，"
-echo "  设 \"export_history\": false"
-echo "────────────────────────────────────────────────────────────"
+echo "Apocalypse → http://localhost:7749"
+echo "Legacy dashboard → http://localhost:7749/legacy/dashboard"
+echo ""
+echo "NOTE: install no longer starts the web server automatically."
+echo "Run 'apocalypse-ui' when you want the UI."
