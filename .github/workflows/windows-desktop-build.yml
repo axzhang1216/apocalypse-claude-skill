@@ -2,57 +2,18 @@ name: Windows desktop release
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
   workflow_dispatch:
-    inputs:
-      version:
-        description: 'Release version, e.g. v0.2.0'
-        required: true
-        type: string
 
 permissions:
   contents: write
 
+env:
+  RELEASE_VERSION: v0.1.0
+  APP_VERSION: 0.1.0
+
 jobs:
-  prepare:
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.event.head_commit.message, 'release: v')
-    runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.version.outputs.version }}
-      app_version: ${{ steps.version.outputs.app_version }}
-    steps:
-      - name: Resolve release version
-        id: version
-        shell: bash
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          INPUT_VERSION: ${{ inputs.version }}
-          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
-        run: |
-          set -euo pipefail
-          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
-            version="$INPUT_VERSION"
-          else
-            if [[ "$COMMIT_MESSAGE" =~ (v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?) ]]; then
-              version="${BASH_REMATCH[1]}"
-            else
-              echo "Could not find a semantic version in the release commit message." >&2
-              exit 1
-            fi
-          fi
-
-          if [[ ! "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
-            echo "Invalid version: $version" >&2
-            exit 1
-          fi
-
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "app_version=${version#v}" >> "$GITHUB_OUTPUT"
-          echo "Preparing Apocalypse $version"
-
   build:
-    needs: prepare
     runs-on: windows-latest
     strategy:
       fail-fast: false
@@ -60,15 +21,17 @@ jobs:
         include:
           - arch: x64
             python_arch: x64
-            pe_machine: '0x8664'
+            expected_bits: '64'
+            pe_machine: '8664'
           - arch: x86
             python_arch: x86
-            pe_machine: '0x014c'
+            expected_bits: '32'
+            pe_machine: '014c'
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python ${{ matrix.arch }}
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -76,8 +39,10 @@ jobs:
 
       - name: Verify Python architecture
         shell: pwsh
+        env:
+          EXPECTED_BITS: ${{ matrix.expected_bits }}
         run: |
-          python -c "import platform, struct; print(platform.python_version(), platform.machine(), struct.calcsize('P') * 8); assert struct.calcsize('P') * 8 == ${{ matrix.arch == 'x64' && '64' || '32' }}"
+          python -c "import os, struct; bits=str(struct.calcsize('P')*8); print('Python bits:', bits); assert bits == os.environ['EXPECTED_BITS']"
 
       - name: Install build dependencies
         shell: pwsh
@@ -86,7 +51,7 @@ jobs:
           pip install -r skills_apocalypse/desktop-requirements.txt
           choco install innosetup -y --no-progress
 
-      - name: Build Apocalypse.exe (${{ matrix.arch }})
+      - name: Build desktop executable
         shell: pwsh
         run: |
           pyinstaller `
@@ -103,93 +68,88 @@ jobs:
             --add-data "skills_apocalypse/dashboard.html;." `
             skills_apocalypse/desktop_app.py
 
-      - name: Verify PE architecture
+      - name: Verify executable architecture
         shell: pwsh
+        env:
+          EXPECTED_MACHINE: ${{ matrix.pe_machine }}
         run: |
           $path = Resolve-Path 'dist/Apocalypse.exe'
           $bytes = [System.IO.File]::ReadAllBytes($path)
-          if ($bytes.Length -lt 1024) { throw 'Apocalypse.exe is unexpectedly small' }
           if ($bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) { throw 'Missing MZ PE header' }
           $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
           $machine = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
-          $expected = [Convert]::ToUInt16('${{ matrix.pe_machine }}'.Substring(2), 16)
+          $expected = [Convert]::ToUInt16($env:EXPECTED_MACHINE, 16)
           Write-Host ('PE machine: 0x{0:X4}' -f $machine)
-          if ($machine -ne $expected) {
-            throw ('Wrong PE architecture. Expected 0x{0:X4}, got 0x{1:X4}' -f $expected, $machine)
-          }
-          $size = (Get-Item $path).Length
-          if ($size -lt 1000000) { throw "Apocalypse.exe looks unexpectedly small: $size bytes" }
+          if ($machine -ne $expected) { throw 'Wrong PE architecture' }
+          if ((Get-Item $path).Length -lt 1000000) { throw 'Apocalypse.exe is unexpectedly small' }
 
-      - name: Build Inno Setup installer
+      - name: Build installer
         shell: pwsh
         env:
-          APP_VERSION: ${{ needs.prepare.outputs.app_version }}
           BUILD_ARCH: ${{ matrix.arch }}
         run: |
           $ErrorActionPreference = 'Stop'
           $exePath = (Resolve-Path 'dist/Apocalypse.exe').Path
           $outputDir = Join-Path $PWD 'installer-dist'
           New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
+          $issPath = Join-Path $PWD "Apocalypse-$env:BUILD_ARCH.iss"
+
+          $lines = @(
+            '[Setup]',
+            'AppId={{4D4A62DD-586F-471A-8B99-6B18C0596501}',
+            'AppName=Apocalypse',
+            "AppVersion=$env:APP_VERSION",
+            'AppPublisher=Aoxing Zhang',
+            'AppPublisherURL=https://github.com/axzhang1216/apocalypse',
+            'AppSupportURL=https://github.com/axzhang1216/apocalypse/issues',
+            'AppUpdatesURL=https://github.com/axzhang1216/apocalypse/releases',
+            'DefaultDirName={autopf}\Apocalypse',
+            'DefaultGroupName=Apocalypse',
+            'DisableProgramGroupPage=yes',
+            'UninstallDisplayIcon={app}\Apocalypse.exe',
+            "OutputDir=$outputDir",
+            "OutputBaseFilename=Apocalypse-Setup-$env:BUILD_ARCH",
+            'Compression=lzma2',
+            'SolidCompression=yes',
+            'WizardStyle=modern',
+            'PrivilegesRequired=admin',
+            'CloseApplications=yes',
+            'RestartApplications=no'
+          )
 
           if ($env:BUILD_ARCH -eq 'x64') {
-            $archDirectives = @'
-          ArchitecturesAllowed=x64compatible
-          ArchitecturesInstallIn64BitMode=x64compatible
-          '@
+            $lines += 'ArchitecturesAllowed=x64compatible'
+            $lines += 'ArchitecturesInstallIn64BitMode=x64compatible'
           } else {
-            $archDirectives = @'
-          ArchitecturesAllowed=x86compatible
-          '@
+            $lines += 'ArchitecturesAllowed=x86compatible'
           }
 
-          $iss = @"
-          [Setup]
-          AppId={{4D4A62DD-586F-471A-8B99-6B18C0596501}
-          AppName=Apocalypse
-          AppVersion=$env:APP_VERSION
-          AppPublisher=Aoxing Zhang
-          AppPublisherURL=https://github.com/axzhang1216/apocalypse
-          AppSupportURL=https://github.com/axzhang1216/apocalypse/issues
-          AppUpdatesURL=https://github.com/axzhang1216/apocalypse/releases
-          DefaultDirName={autopf}\Apocalypse
-          DefaultGroupName=Apocalypse
-          DisableProgramGroupPage=yes
-          UninstallDisplayIcon={app}\Apocalypse.exe
-          OutputDir=$outputDir
-          OutputBaseFilename=Apocalypse-Setup-$env:BUILD_ARCH
-          Compression=lzma2
-          SolidCompression=yes
-          WizardStyle=modern
-          PrivilegesRequired=admin
-          CloseApplications=yes
-          RestartApplications=no
-          $archDirectives
+          $lines += @(
+            '',
+            '[Tasks]',
+            'Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"; Flags: unchecked',
+            '',
+            '[Files]',
+            "Source: `"$exePath`"; DestDir: `"{app}`"; Flags: ignoreversion",
+            '',
+            '[Icons]',
+            'Name: "{group}\Apocalypse"; Filename: "{app}\Apocalypse.exe"',
+            'Name: "{autodesktop}\Apocalypse"; Filename: "{app}\Apocalypse.exe"; Tasks: desktopicon',
+            '',
+            '[Run]',
+            'Filename: "{app}\Apocalypse.exe"; Description: "Launch Apocalypse"; Flags: nowait postinstall skipifsilent'
+          )
 
-          [Tasks]
-          Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"; Flags: unchecked
-
-          [Files]
-          Source: "$exePath"; DestDir: "{app}"; Flags: ignoreversion
-
-          [Icons]
-          Name: "{group}\Apocalypse"; Filename: "{app}\Apocalypse.exe"
-          Name: "{autodesktop}\Apocalypse"; Filename: "{app}\Apocalypse.exe"; Tasks: desktopicon
-
-          [Run]
-          Filename: "{app}\Apocalypse.exe"; Description: "Launch Apocalypse"; Flags: nowait postinstall skipifsilent
-          "@
-
-          $issPath = Join-Path $PWD "Apocalypse-$env:BUILD_ARCH.iss"
-          Set-Content -Path $issPath -Value $iss -Encoding UTF8
+          $lines | Set-Content -Path $issPath -Encoding UTF8
+          Get-Content $issPath
 
           $iscc = 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
-          if (-not (Test-Path $iscc)) { throw "Inno Setup compiler not found: $iscc" }
+          if (-not (Test-Path $iscc)) { throw 'Inno Setup compiler not found' }
           & $iscc $issPath
           if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
 
           $setup = Join-Path $outputDir "Apocalypse-Setup-$env:BUILD_ARCH.exe"
-          if (-not (Test-Path $setup)) { throw "Installer was not created: $setup" }
-          Write-Host "Installer: $setup"
+          if (-not (Test-Path $setup)) { throw 'Installer was not created' }
           Get-Item $setup | Format-List Name,Length,LastWriteTime
 
       - name: Smoke-test silent install
@@ -197,14 +157,11 @@ jobs:
         env:
           BUILD_ARCH: ${{ matrix.arch }}
         run: |
-          $ErrorActionPreference = 'Stop'
           $setup = (Resolve-Path "installer-dist/Apocalypse-Setup-$env:BUILD_ARCH.exe").Path
           $target = Join-Path $env:RUNNER_TEMP "Apocalypse-$env:BUILD_ARCH-test"
           $proc = Start-Process -FilePath $setup -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',"/DIR=$target" -Wait -PassThru
           if ($proc.ExitCode -ne 0) { throw "Silent installer test failed: $($proc.ExitCode)" }
-          $installed = Join-Path $target 'Apocalypse.exe'
-          if (-not (Test-Path $installed)) { throw "Installed Apocalypse.exe not found at $installed" }
-          Write-Host "Silent install smoke test passed: $installed"
+          if (-not (Test-Path (Join-Path $target 'Apocalypse.exe'))) { throw 'Installed executable not found' }
 
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4
@@ -215,13 +172,10 @@ jobs:
           retention-days: 30
 
   release:
-    needs:
-      - prepare
-      - build
+    needs: build
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
-      VERSION: ${{ needs.prepare.outputs.version }}
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -229,42 +183,37 @@ jobs:
           path: release-assets
           merge-multiple: true
 
-      - name: Generate SHA256 checksums
+      - name: Create checksums
         shell: bash
         run: |
           cd release-assets
           sha256sum Apocalypse-Setup-x64.exe Apocalypse-Setup-x86.exe > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
-      - name: Write release notes
+      - name: Create release
         shell: bash
         run: |
-          cat > release-notes.md <<EOF
-          ## Apocalypse ${VERSION}
+          cat > release-notes.md <<'EOF'
+          ## Apocalypse v0.1.0
 
-          Windows desktop release of Apocalypse Spatial OS.
+          First Windows desktop release of Apocalypse Spatial OS.
 
-          - **Apocalypse-Setup-x64.exe** — recommended for normal 64-bit Windows 10/11 systems.
-          - **Apocalypse-Setup-x86.exe** — native 32-bit build for 32-bit Windows / x86 environments.
+          - **Apocalypse-Setup-x64.exe** — recommended for standard 64-bit Windows 10/11.
+          - **Apocalypse-Setup-x86.exe** — native 32-bit build for x86 Windows environments.
           - **SHA256SUMS.txt** — checksums for both installers.
 
-          The application opens as a standalone Windows desktop window rather than a browser tab. It embeds the local Apocalypse server and uses Microsoft Edge WebView2 for the UI renderer.
+          Apocalypse runs in a standalone desktop window and embeds its local server. The UI is rendered through Microsoft Edge WebView2 rather than opening a browser tab.
 
-          **Note:** these community-built installers are currently unsigned, so Windows SmartScreen may show a warning on first launch.
+          These installers are currently unsigned, so Windows SmartScreen may warn on first launch.
           EOF
 
-      - name: Create GitHub Release and upload installers
-        shell: bash
-        run: |
-          set -euo pipefail
-          if gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "Release $VERSION already exists; uploading/replacing assets."
-            gh release upload "$VERSION" release-assets/* --repo "$GITHUB_REPOSITORY" --clobber
+          if gh release view "$RELEASE_VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_VERSION" release-assets/* --repo "$GITHUB_REPOSITORY" --clobber
           else
-            gh release create "$VERSION" release-assets/* \
+            gh release create "$RELEASE_VERSION" release-assets/* \
               --repo "$GITHUB_REPOSITORY" \
               --target "$GITHUB_SHA" \
-              --title "Apocalypse $VERSION" \
+              --title "Apocalypse $RELEASE_VERSION" \
               --notes-file release-notes.md \
               --latest
           fi
