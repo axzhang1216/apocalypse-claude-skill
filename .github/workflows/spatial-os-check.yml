@@ -6,6 +6,9 @@ on:
       - feat/spatial-os-integration
     paths:
       - 'skills_apocalypse/spatial_*'
+      - 'skills_apocalypse/apocalypse_ui.py'
+      - 'skills_apocalypse/apocalypse-ui'
+      - 'skills_apocalypse/apocalypse-ui.cmd'
       - 'skills_apocalypse/start.sh'
       - 'skills_apocalypse/install.sh'
       - 'skills_apocalypse/tests/test_spatial_server.py'
@@ -13,6 +16,9 @@ on:
   pull_request:
     paths:
       - 'skills_apocalypse/spatial_*'
+      - 'skills_apocalypse/apocalypse_ui.py'
+      - 'skills_apocalypse/apocalypse-ui'
+      - 'skills_apocalypse/apocalypse-ui.cmd'
       - 'skills_apocalypse/start.sh'
       - 'skills_apocalypse/install.sh'
       - 'skills_apocalypse/tests/test_spatial_server.py'
@@ -29,10 +35,10 @@ jobs:
         with:
           node-version: '22'
       - name: Python syntax
-        run: python -m py_compile skills_apocalypse/spatial_server.py
+        run: python -m py_compile skills_apocalypse/spatial_server.py skills_apocalypse/apocalypse_ui.py
       - name: Spatial bridge tests
         run: python -m unittest skills_apocalypse.tests.test_spatial_server
       - name: JavaScript syntax
         run: node --check skills_apocalypse/spatial_os.js
       - name: Shell syntax
-        run: bash -n skills_apocalypse/start.sh skills_apocalypse/install.sh
+        run: bash -n skills_apocalypse/start.sh skills_apocalypse/install.sh skills_apocalypse/apocalypse-ui
