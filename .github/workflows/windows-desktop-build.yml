@@ -1,0 +1,61 @@
+name: Windows desktop build
+
+on:
+  push:
+    branches:
+      - feat/spatial-os-integration
+    paths:
+      - 'skills_apocalypse/desktop_app.py'
+      - 'skills_apocalypse/desktop-requirements.txt'
+      - 'skills_apocalypse/spatial_server.py'
+      - 'skills_apocalypse/spatial_os.*'
+      - 'skills_apocalypse/server.py'
+      - 'skills_apocalypse/platform_utils.py'
+      - 'skills_apocalypse/dashboard.html'
+      - '.github/workflows/windows-desktop-build.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install desktop build dependencies
+        run: pip install -r skills_apocalypse/desktop-requirements.txt
+
+      - name: Build Apocalypse.exe
+        shell: pwsh
+        run: |
+          pyinstaller `
+            --noconfirm `
+            --clean `
+            --onefile `
+            --windowed `
+            --name Apocalypse `
+            --collect-all webview `
+            --hidden-import clr `
+            --add-data "skills_apocalypse/spatial_os.html;." `
+            --add-data "skills_apocalypse/spatial_os.css;." `
+            --add-data "skills_apocalypse/spatial_os.js;." `
+            --add-data "skills_apocalypse/dashboard.html;." `
+            skills_apocalypse/desktop_app.py
+
+      - name: Smoke-check artifact
+        shell: pwsh
+        run: |
+          if (-not (Test-Path dist/Apocalypse.exe)) { throw 'Apocalypse.exe was not created' }
+          $size = (Get-Item dist/Apocalypse.exe).Length
+          if ($size -lt 1000000) { throw "Apocalypse.exe looks unexpectedly small: $size bytes" }
+          Write-Host "Apocalypse.exe size: $size bytes"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Apocalypse-Windows
+          path: dist/Apocalypse.exe
+          if-no-files-found: error
+          retention-days: 14

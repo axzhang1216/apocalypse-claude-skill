@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Apocalypse Spatial OS</title>
+<link rel="stylesheet" href="/spatial_os.css">
+</head>
+<body>
+<canvas id="stars"></canvas><div class="cursor-orb" id="cursorOrb"></div>
+<div class="shell">
+  <div class="top">
+    <div class="brand"><i></i>APOCALYPSE <small>/ SPATIAL OS</small></div>
+    <div class="tabs"><button id="spaceTab" class="active signal-text">SPACE</button><button id="opsTab" class="signal-text">OPS</button></div>
+    <div class="spacer"></div>
+    <button class="ghost signal-text" id="searchBtn">⌕</button><button class="ghost" id="homeBtn">⌂</button>
+  </div>
+  <div class="bottom"><div class="shortcut"><kbd>⌘ K</kbd> search</div><div class="trail" id="trail"><b>WORKSPACE</b> / semantic universe</div><div class="run-dock" id="runDock"><i></i><span id="runText">SYNCING RUN STATE…</span></div></div>
+</div>
+
+<section class="view" id="space"><canvas id="universe"></canvas></section>
+
+<section class="view hidden" id="ops">
+  <main class="instrument" id="instrument">
+    <canvas id="weatherCanvas"></canvas>
+    <div class="ops-aurora ops-a" aria-hidden="true"></div>
+    <div class="ops-aurora ops-b" aria-hidden="true"></div>
+    <div class="ops-sweep" aria-hidden="true"></div>
+
+    <section class="zone activity-zone focusable" data-focus="activity">
+      <header><span class="signal-text">ACTIVITY FIELD</span><b id="activityKpi">—</b></header>
+      <div class="activity-wrap">
+        <div class="activity-grid" id="activityGrid"></div>
+        <div class="day-log" id="dayLog">
+          <div class="day-log-head"><span id="dayLogDate">DAY LOG</span><button id="closeDayLog">×</button></div>
+          <div class="day-summary" id="daySummary"></div>
+          <div class="day-stats" id="dayStats"></div>
+          <div class="day-work" id="dayWork"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="zone quota-zone focusable" data-focus="quota">
+      <header><span class="signal-text">LLM QUOTA</span><b>LIVE</b></header>
+      <div class="qrows" id="quotaRows"></div>
+    </section>
+
+    <section class="zone agenda-zone focusable" data-focus="agenda">
+      <header><span class="signal-text">AGENDA</span><b>TODAY</b></header>
+      <div class="agenda-list" id="agendaList"></div>
+      <div class="tasks" id="taskList"></div>
+      <div class="suggested" id="suggestedList"></div>
+    </section>
+
+    <section class="zone sessions-zone focusable" data-focus="sessions">
+      <header><span class="signal-text">SESSION CURRENT</span><b>SSE</b></header>
+      <div class="session-list" id="sessionList"></div>
+    </section>
+
+    <section class="zone crew-zone focusable" data-focus="crew">
+      <header><span class="signal-text">ACTIVE CREW</span><b id="agentCount">—</b></header>
+      <div class="crew-field" id="crewField">
+        <canvas id="crewRain"></canvas>
+        <svg class="crew-signals" id="crewSignals" preserveAspectRatio="none"></svg>
+        <div class="crew-nodes" id="crewNodes"></div>
+        <div class="crew-legend"><span><i class="reasoning"></i>REASONING</span><span><i class="coding"></i>CODING</span><span><i class="waiting"></i>WAITING</span></div>
+      </div>
+    </section>
+  </main>
+</section>
+
+<div class="tooltip" id="tooltip"><div class="k" id="ttKind"></div><div class="t" id="ttTitle"></div><div class="m" id="ttMeta"></div></div>
+<aside class="inspector" id="inspector"><button class="close" id="closeInspector">×</button><div id="inspectorBody"></div></aside>
+<div class="search" id="search"><div class="searchbox"><input id="searchInput" placeholder="Search project, session, decision, plan, agent, file…"><div class="results" id="results"></div></div></div>
+
+<script src="/spatial_os.js"></script>
+</body></html>
